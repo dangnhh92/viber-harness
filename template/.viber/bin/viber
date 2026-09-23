@@ -1,0 +1,2803 @@
+#!/usr/bin/env python3
+"""viber - project memory as records. No dependencies, stdlib only.
+
+Records live one file per record under .viber/memory/records/.
+state.md and index.md are generated; never hand-edit them.
+
+  viber new <type> "<title>" [--tags a,b] [--status open] [--body "..." | --body-file PATH]
+  viber set <id> <status>
+  viber list [--status s] [--type t] [--tag x]
+  viber show <id>
+  viber fact "<label>" <file> <symbol>   register a fact resolved from source, never stale
+  viber state          regenerate state.md and print it
+  viber index          regenerate index.md
+  viber check          report anything left hanging (runs on every prompt)
+  viber finding <file> "<problem>" [--severity high]   record a review finding, repeats detected automatically
+  viber trigger <kind> "<what happened>"   raise a learning signal
+  viber lessons --for <role> [--tags a,b] [--limit 5]   ranked, capped lesson recall
+  viber doctor         plain language health report: is this project being run properly
+  viber init           scaffold the layout in the current directory
+"""
+import json
+import ast
+import hashlib
+import os
+import re
+import subprocess
+import sys
+from datetime import date, datetime
+
+TYPES = ["decision", "task", "issue", "lesson", "milestone", "question", "fact"]
+STATUSES = ["open", "doing", "blocked", "done", "dropped"]
+LIVE = ["open", "doing", "blocked"]
+# Body lines recall prints. The cap keeps injected context small, but a line that does
+# not match is dropped in silence: it still reads fine in `show`, so the author never
+# learns the caveat never arrived. Exceptions and scope limits failed that way, and they
+# are exactly what stops a lesson from firing on a case it was never meant to cover.
+RECALLED = ("do differently", "làm khác", "exception", "ngoại lệ", "scope", "phạm vi")
+
+def find_root(start):
+    """Where the project is, in order of trust: an explicit override, the nearest
+    .viber above the working directory, and failing that the layout around this
+    script itself, since it lives at <root>/.viber/bin/viber. Falling back to the
+    working directory would try to create a .viber wherever the caller happened to
+    be standing, which is how a wrapper running from elsewhere breaks."""
+    d = os.path.abspath(start)
+    while True:
+        if os.path.isdir(os.path.join(d, ".viber")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if os.path.isdir(os.path.join(here, ".viber")):
+        return here
+    return os.path.abspath(start)
+
+
+ROOT = os.environ.get("VIBER_ROOT") or find_root(os.getcwd())
+MEM = os.path.join(ROOT, ".viber", "memory")
+RECORDS = os.path.join(MEM, "records")
+DOCS = os.path.join(ROOT, ".viber", "docs")
+
+
+def now():
+    """Records carry a full timestamp, not just a day. Without one there is no total
+    order, and every consumer ends up inventing its own tie breaker."""
+    # Microseconds, not seconds: several records can be written inside one second,
+    # and a timestamp that cannot separate them is not a total order.
+    return datetime.now().isoformat()
+
+
+def day(v):
+    """The date part of a timestamp, for anything that reasons in whole days."""
+    return (v or "")[:10]
+
+
+def die(msg):
+    print(f"viber: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def slug(text, n=6, limit=60):
+    # Keep letters and digits in any script, so Vietnamese and Japanese titles
+    # survive into the filename instead of being shredded into fragments. The length
+    # cap is not cosmetic: one very long word makes a filename the filesystem refuses,
+    # and the record is then lost after its id was already claimed.
+    words = re.findall(r"[^\W_]+", text.lower(), re.UNICODE)
+    out = "-".join(words[:n])[:limit].strip("-")
+    return out or "record"
+
+
+def parse(path):
+    """Read one record file into a dict. Frontmatter is flat key: value."""
+    with open(path, encoding="utf-8") as fh:
+        raw = fh.read()
+    meta, body = {}, raw
+    if raw.startswith("---"):
+        end = raw.find("\n---", 3)
+        if end > 0:
+            for line in raw[3:end].strip().splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    meta[k.strip()] = v.strip()
+            body = raw[end + 4:].strip()
+    meta["_path"] = path
+    meta["_body"] = body
+    meta.setdefault("tags", "")
+    return meta
+
+
+def all_records():
+    """A directory listing is a snapshot. Another session may be renaming a freshly
+    reserved file while we read, so a file that vanishes is skipped rather than fatal.
+    Reservations themselves carry no id yet and are skipped for the same reason."""
+    if not os.path.isdir(RECORDS):
+        return []
+    out = []
+    for f in os.listdir(RECORDS):
+        if not f.endswith(".md"):
+            continue
+        try:
+            rec = parse(os.path.join(RECORDS, f))
+        except (FileNotFoundError, IsADirectoryError):
+            continue
+        if rec.get("id"):
+            out.append(rec)
+    return sorted(out, key=lambda r: r.get("id", ""))
+
+
+def find(rid):
+    rid = rid.upper()
+    if not rid.startswith("R-"):
+        rid = "R-" + rid
+    for r in all_records():
+        if r.get("id", "").upper() == rid:
+            return r
+    die(f"no record {rid}")
+
+
+IDS = os.path.join(MEM, ".ids")
+
+
+def claim_id():
+    """Claim an id by creating a permanent marker for it. The marker is never renamed
+    or removed, so a claimed id can never be handed out twice. Reserving the record
+    file itself does not work: renaming it to its readable name frees the name again,
+    and a session that computed the same number in the meantime then claims it too."""
+    os.makedirs(IDS, exist_ok=True)
+    os.makedirs(RECORDS, exist_ok=True)
+    taken = {int(m.group(1)) for f in os.listdir(IDS) if (m := re.match(r"R-(\d+)$", f))}
+    taken |= {int(m.group(1)) for f in os.listdir(RECORDS) if (m := re.match(r"R-(\d+)", f))}
+    n = max(taken, default=0)
+    while True:
+        n += 1
+        rid = f"R-{n:03d}"
+        try:
+            fd = os.open(os.path.join(IDS, rid), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return rid
+        except FileExistsError:
+            continue
+
+
+def finish_record(rec, prefix="", name=None):
+    """The id is already claimed, so the file can be written straight to its name."""
+    rec["_path"] = os.path.join(
+        RECORDS, f"{rec['id']}-{prefix}{slug(name or rec['title'])}.md")
+    write_record(rec)
+
+
+def tags_of(rec):
+    return [t.strip() for t in re.sub(r"[\[\]]", "", rec.get("tags", "")).split(",") if t.strip()]
+
+
+def flat(v):
+    """Frontmatter is one value per line, so a value may never contain a newline."""
+    return " ".join(str(v or "").split())
+
+
+def write_record(rec):
+    fm = [f"id: {rec['id']}", f"type: {rec['type']}", f"status: {rec['status']}",
+          f"tags: [{', '.join(tags_of(rec))}]", f"title: {flat(rec['title'])}",
+          f"created: {rec['created']}", f"updated: {rec['updated']}"]
+    for extra in ("applies_to", "hits", "last_hit", "fingerprint", "seen", "severity",
+                  "source", "symbol"):
+        if rec.get(extra):
+            fm.append(f"{extra}: {rec[extra]}")
+    text = "---\n" + "\n".join(fm) + "\n---\n\n" + (rec.get("_body") or "") + "\n"
+    with open(rec["_path"], "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+# ---------- generated views ----------
+
+def gen_index():
+    rows = []
+    for r in all_records():
+        rows.append("{id:<7} [{t}/{s}] {u:<11} {tags:<22} {title}".format(
+            id=r.get("id", "?"), t=r.get("type", "?"), s=r.get("status", "?"),
+            u=day(r.get("updated", "")), tags=",".join(tags_of(r))[:22],
+            title=r.get("title", "")))
+    body = ("# Record index (generated, do not edit)\n\n"
+            "Grep this file to find a record, then read only that record.\n\n"
+            + ("\n".join(rows) if rows else "(no records yet)") + "\n")
+    os.makedirs(MEM, exist_ok=True)
+    with open(os.path.join(MEM, "index.md"), "w", encoding="utf-8") as fh:
+        fh.write(body)
+    return len(rows)
+
+
+def resolve_fact(rec):
+    """Read a fact's value straight from the source, right now. This is the whole point
+    of a fact record: the value that reaches the agent's context is never trusted from
+    memory, it is pulled from the file every time state is regenerated, so it cannot go
+    stale on any model. If the source moved or the symbol is gone, that surfaces loudly
+    as STALE rather than serving a wrong value in silence."""
+    src = (rec.get("source") or "").strip()
+    sym = (rec.get("symbol") or "").strip()
+    label = rec.get("title", "")
+    if not src or not sym:
+        return label, "STALE: no source or symbol recorded", ""
+    path = os.path.join(ROOT, src)
+    if not os.path.exists(path):
+        return label, f"STALE: {src} is not on the tree", src
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError as exc:
+        return label, f"STALE: cannot read {src} ({exc})", src
+    idx = [i for i, ln in enumerate(lines) if sym in ln]
+    hits = [lines[i].strip() for i in idx]
+    if not hits:
+        return label, f"STALE: '{sym}' not found in {src}", src
+    if len(hits) == 1:
+        return label, _whole_value(lines, idx[0], sym, src), src
+    # More than one line mentions the symbol. Joining them served a three-line blob where
+    # a value was promised, and a fact that reads as a blob is a fact nobody trusts. A
+    # comment or a doc line is prose about the value, never the value: drop those, then
+    # prefer the line that binds the symbol. Ambiguity is reported, not concatenated.
+    code = [h for h in hits if not h.lstrip().startswith(("#", "//", "*", "/*"))]
+    bound = [(i, h) for i, h in zip(idx, hits)
+             if h in code and re.search(rf"\b{re.escape(sym)}\s*[:=]", h)]
+    if len(bound) == 1:
+        return label, _whole_value(lines, bound[0][0], sym, src), src
+    if not bound:
+        return label, (code[0] if code else
+                       f"AMBIGUOUS: '{sym}' appears only in comments in {src}"), src
+    return label, (f"AMBIGUOUS: '{sym}' is bound {len(bound)} times in {src}; "
+                   f"name a unique symbol"), src
+
+
+_OPEN, _CLOSE = "([{", ")]}"
+_VALUE_LINES, _VALUE_CHARS = 24, 160
+
+
+def _whole_value(lines, i, sym, src):
+    """A value that spans lines is the normal case for config: a map of difficulties, a
+    list of regions, a settings object. Returning only the line the symbol is bound on
+    served `export const ENEMY_CAPS = {`, which reads like a resolved value and is not
+    one. Silent truncation is worse than STALE here, because nothing about it looks
+    wrong. So follow the brackets to the end of the value and collapse it to one line,
+    and when it is too big to render, say which file to read rather than show a stub."""
+    depth, out = 0, []
+    for n in range(i, min(i + _VALUE_LINES, len(lines))):
+        raw = lines[n]
+        out.append(raw.strip())
+        # Crude on purpose: a bracket inside a string literal would miscount. The cost
+        # of that is a value rendered a line short or long, not a wrong number, and a
+        # real parser here would mean a grammar per language for a config lookup.
+        depth += sum(c in _OPEN for c in raw) - sum(c in _CLOSE for c in raw)
+        if depth <= 0:
+            break
+    else:
+        return f"TOO LARGE: '{sym}' spans more than {_VALUE_LINES} lines in {src}; read the file"
+    if depth > 0:
+        return f"TOO LARGE: '{sym}' spans more than {_VALUE_LINES} lines in {src}; read the file"
+    value = re.sub(r"\s+", " ", " ".join(out)).strip()
+    if len(value) > _VALUE_CHARS:
+        return f"TOO LARGE: '{sym}' is {len(value)} chars in {src}; read the file"
+    return value
+
+
+def gen_state():
+    recs = all_records()
+    # A dropped fact is a retired one. Rendering it anyway put a permanent STALE line at
+    # the top of every session for a record its author had already closed.
+    facts = [r for r in recs if r.get("type") == "fact" and r.get("status") != "dropped"]
+    live = [r for r in recs if r.get("status") in LIVE and r.get("type") != "fact"]
+
+    def is_signal(r):
+        t = tags_of(r)
+        return "trigger" in t or "finding" in t
+
+    work = [r for r in live if not is_signal(r)]
+    signals = [r for r in live if is_signal(r)]
+    # Most recently touched first: on a long project the lowest ids are the oldest
+    # abandoned items, and opening every session with those is worse than useless.
+    work.sort(key=lambda r: r.get("updated", ""), reverse=True)
+    by = {st: [r for r in work if r.get("status") == st] for st in LIVE}
+
+    def line(r):
+        return f"  {r.get('id')}  {r.get('title', '')}"
+
+    out = ["# State (generated, do not edit)", ""]
+    out.append("Open: {n}  (doing {d} - blocked {b} - todo {o})".format(
+        n=len(work), d=len(by["doing"]), b=len(by["blocked"]), o=len(by["open"])))
+    out.append("")
+    if facts:
+        out += ["Facts (resolved from source now, trust these over any value typed elsewhere):"]
+        for r in facts:
+            label, val, src = resolve_fact(r)
+            tail = f"  ({src})" if src and not val.startswith("STALE") else ""
+            out.append(f"  {label}: {val}{tail}")
+        out.append("")
+    if by["doing"]:
+        out += ["Doing:"] + [line(r) for r in by["doing"]] + [""]
+    if by["blocked"]:
+        out += ["Blocked:"] + [line(r) for r in by["blocked"]] + [""]
+    nxt = by["open"][:3]
+    if nxt:
+        out += ["Next up (most recently touched):"] + [line(r) for r in nxt]
+        if len(by["open"]) > 3:
+            out += [f"  ... and {len(by['open']) - 3} more"]
+        out += [""]
+    if signals:
+        out += [f"Learning signals waiting ({len(signals)}), process these before they pile up:"]
+        out += [line(r) for r in signals[:5]]
+        if len(signals) > 5:
+            out += [f"  ... and {len(signals) - 5} more"]
+        out += [""]
+    recent = [r for r in recs
+              if r.get("type") in ("decision", "milestone")][-3:]
+    if recent:
+        out += ["Recent decisions:"] + [line(r) for r in recent] + [""]
+    out += ["Full list: grep .viber/memory/index.md \"/open\"", ""]
+    # Environment faults are a per session concern, so they surface here rather than
+    # in the per turn check, where they would become noise and get ignored.
+    faults = check_environment()[0] + check_integrity()
+    if faults:
+        out += ["FRAMEWORK PROBLEMS, fix these before trusting anything above:"]
+        out += ["  - " + f for f in faults[:5]]
+        if len(faults) > 5:
+            out += [f"  ... and {len(faults) - 5} more, run `viber doctor`"]
+        out += [""]
+    body = "\n".join(out)
+    os.makedirs(MEM, exist_ok=True)
+    with open(os.path.join(MEM, "state.md"), "w", encoding="utf-8") as fh:
+        fh.write(body)
+    return body
+
+
+def regen():
+    gen_index()
+    gen_state()
+
+
+def _raise_trigger(kind, title, note=""):
+    """A trigger is an open issue record. It shows up in state, check nags about it
+    every turn until it is resolved, and resolving it is a normal status change."""
+    today = now()
+    rid = claim_id()
+    os.makedirs(RECORDS, exist_ok=True)
+    rec = {"id": rid, "type": "issue", "status": "open",
+           "tags": f"trigger, {kind}", "title": title,
+           "created": today, "updated": today,
+           "_body": (note + "\n\n" if note else "")
+                    + "A learning signal. Decide whether it is a lesson, then close this.\n"
+                      "If it is: write the lesson, apply the cheapest remedy, close this record.\n"
+                      "If it is not: set this to dropped and say why.",
+           }
+    finish_record(rec, "trigger-")
+    return rid
+
+
+def open_triggers():
+    return [r for r in all_records()
+            if r.get("status") in ("open", "doing") and "trigger" in tags_of(r)]
+
+
+def _finding_path(file):
+    # The path from the root, not the basename: src/auth/session.ts and lib/session.ts
+    # are two defects. Old records keep their basename fingerprints and still load.
+    full = os.path.normpath(os.path.join(ROOT, file or ""))
+    return os.path.relpath(full, ROOT).replace(os.sep, "/")
+
+
+def _fingerprint(file, problem):
+    """Identity of a defect, so the same defect coming back is detectable without
+    anyone remembering it. Agents never mint ids: they describe, the CLI identifies."""
+    f = _finding_path(file).lower()
+    words = re.findall(r"[^\W_]+", (problem or "").lower(), re.UNICODE)[:6]
+    return f"{f}:{'-'.join(words)}"
+
+
+def cmd_finding(args):
+    if len(args) < 2:
+        die('usage: viber finding <file> "<problem>" [--severity high] [--violates "..."]\n'
+            '       viber finding <file> --problem-file PATH [--severity high]')
+    file = args[0]
+    # Same quoting trap as --body-file: a problem read from a file never passes through
+    # the shell, so no apostrophe can truncate it. The positional form still works.
+    if args[1].startswith("--"):
+        opts = parse_opts(args[1:])
+        problem = read_body({"body-file": opts.get("problem-file") or opts.get("problem_file")})
+        if not problem:
+            die("--problem-file is required when no positional problem is given")
+    else:
+        problem = args[1]
+        opts = parse_opts(args[2:])
+        pf = opts.get("problem-file") or opts.get("problem_file")
+        if pf:
+            problem = read_body({"body-file": pf})
+    fp = _fingerprint(file, problem)
+    today = now()
+
+    for r in all_records():
+        if r.get("fingerprint") != fp:
+            continue
+        # Reported twice in the same run is a duplicate, not a recurrence. Only a
+        # defect that was closed, or last seen on an earlier day, has actually come back.
+        came_back = r.get("status") == "done" or day(r.get("updated")) < day(today)
+        if not came_back:
+            print(f"{r['id']}  already recorded  {r.get('title', '')}")
+            return
+        seen = as_int(r.get("seen"), 1) + 1
+        r["seen"], r["status"], r["updated"] = str(seen), "open", today
+        write_record(r)
+        _raise_trigger("repeat", f"{r['id']} is back, seen {seen} times now: {r.get('title', '')}",
+                       f"Same defect, same place. A fix that does not hold is a design problem, "
+                       f"not a coding one. Look for the cause rather than repairing it again.")
+        regen()
+        print(f"{r['id']}  repeat x{seen}  {r.get('title', '')}")
+        return
+
+    rid = claim_id()
+    os.makedirs(RECORDS, exist_ok=True)
+    rec = {"id": rid, "type": "issue", "status": "open",
+           "tags": f"finding, {opts.get('severity', 'medium')}",
+           "title": f"{_finding_path(file)}: {problem}"[:120],
+           "created": today, "updated": today,
+           "fingerprint": fp, "seen": "1", "severity": opts.get("severity", "medium"),
+           "_body": f"File: {file}\nProblem: {problem}\nViolates: {opts.get('violates', 'the approved design')}",
+           }
+    finish_record(rec, "finding-", problem)
+    regen()
+    print(f"{rid}  finding/{rec['severity']}  {problem[:60]}")
+
+
+def cmd_trigger(args):
+    if len(args) < 2:
+        die('usage: viber trigger <kind> "<what happened>" [--note "..."]')
+    kind, title = args[0], args[1]
+    opts = parse_opts(args[2:])
+    rid = _raise_trigger(kind, title, opts.get("note", ""))
+    regen()
+    print(f"{rid}  trigger/{kind}  {title}")
+
+
+# A file path the lesson names, so it can be checked against the tree at recall time.
+# Backtick-quoted or bare, but it must look like a project file: a slash and a real
+# extension, or a known project directory. Kept narrow on purpose, because a false
+# "stale" flag teaches the orchestrator to ignore the flag, which is the failure the
+# check exists to prevent. URLs and version numbers are excluded.
+_PATH_REF = re.compile(
+    r"(?<![\w@:./])((?:\.?[\w.-]+/)+[\w.-]+\.[A-Za-z]{1,5})(?![\w/])")
+
+
+def _stale_refs(body):
+    """Paths a lesson names that are no longer on disk. A lesson is a fact written in
+    the past; a path it points at may have moved or been renamed since, and an agent
+    that trusts the lesson without checking will act on the wrong file. So we check
+    here, at the moment of recall, rather than hoping the reader verifies."""
+    seen, missing = set(), []
+    for m in _PATH_REF.finditer(body or ""):
+        ref = m.group(1).strip("`")
+        if ref in seen or ref.startswith(("http:", "https:", "//")):
+            continue
+        seen.add(ref)
+        if not os.path.exists(os.path.join(ROOT, ref)):
+            missing.append(ref)
+    return missing
+
+
+def cmd_lessons(args):
+    """Ranked, capped retrieval. Relevance was decided when the lesson was written,
+    so this is a lookup, not a judgement. Injecting everything would blow the context,
+    so the cap is hard. Each recalled lesson is checked against the tree: a lesson that
+    names a file no longer there is flagged, because a confident stale fact in context
+    is exactly what stops an agent from verifying."""
+    opts = parse_opts(args)
+    role = opts.get("for")
+    want = [t.strip() for t in (opts.get("tags") or "").split(",") if t.strip()]
+    limit = as_int(opts.get("limit"), 5)
+    out = []
+    for r in all_records():
+        if r.get("type") != "lesson" or r.get("status") == "dropped":
+            continue
+        scope = [t.strip() for t in re.sub(r"[\[\]]", "", r.get("applies_to", "")).split(",") if t.strip()]
+        if role and scope and role not in scope:
+            continue
+        topical = [t for t in tags_of(r) if t not in scope]
+        overlap = len(set(want) & set(topical + scope))
+        # A lesson with its own topic must match the topic asked about. A lesson with
+        # no topic is general to its role and always applies. Never pad the list with
+        # unrelated lessons just to reach the limit: that is context spent on noise.
+        if want and topical and not overlap:
+            continue
+        if want and not topical and not role:
+            continue
+        score = overlap * 10 + as_int(r.get("hits"), 0) * 2
+        score += 1 if (r.get("updated", "") >= str(date.today().replace(day=1))) else 0
+        out.append((score, r))
+    out.sort(key=lambda x: (-x[0], x[1].get("updated", "")))
+    picked = [r for _, r in out[:limit]]
+    # A topic that matches no lesson returns nothing, and nothing reads exactly like
+    # "this project has learned nothing relevant". It is the wrong answer whenever the
+    # role has lessons that carry no topic of their own, so fall back to the role and
+    # say so. Silence here is what makes recall stop being run at all.
+    fell_back = False
+    if want and not picked and role:
+        fell_back = True
+        picked = [r for r in all_records()
+                  if r.get("type") == "lesson" and r.get("status") != "dropped"
+                  and role in [t.strip() for t in
+                               re.sub(r"[\[\]]", "", r.get("applies_to", "")).split(",")
+                               if t.strip()]][:limit]
+    for r in picked:
+        r["hits"] = str(as_int(r.get("hits"), 0) + 1)
+        r["last_hit"] = now()
+        write_record(r)
+    if not picked:
+        print("(no relevant lessons)")
+        return
+    regen()  # the hit-count bumps above are writes; regenerate so state/index do not read as stale next turn
+    if fell_back:
+        print(f"# no lesson is tagged {', '.join(want)}. Showing what {role} has "
+              f"learned generally instead -- treat topical relevance as unproven.")
+    print(f"# {len(picked)} lesson(s) that bit before. Do not repeat these.")
+    for r in picked:
+        print(f"\n- {r.get('title', '')}")
+        body = (r.get("_body") or "").strip()
+        for line in body.splitlines():
+            if line.lower().startswith(RECALLED):
+                print(f"  {line.strip()}")
+        stale = _stale_refs(body)
+        if stale:
+            print(f"  [stale? names files not on the tree: {', '.join(stale[:4])}"
+                  + (" ..." if len(stale) > 4 else "")
+                  + " -- verify against the code before acting on this lesson]")
+
+
+# ---------- commands ----------
+
+def read_body(opts):
+    """Body text from --body, or from --body-file when given.
+
+    A single apostrophe inside a shell-quoted --body closes the quote, and everything
+    after it is lost in silence: the record is written truncated, the id comes back, the
+    command succeeds. Only a stray "command not found" on stderr betrays it. Telling
+    people to avoid apostrophes is a remedy that asks someone to remember; passing a path
+    means no shell ever sees the text, so the mistake stops being possible."""
+    path = opts.get("body-file") or opts.get("body_file")
+    if path:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return fh.read().strip()
+        except OSError as e:
+            die(f"--body-file {path}: {e}")
+    return opts.get("body", "")
+
+
+_VN_DIACRITICS = (
+    "àáạảãâầấậẩẫ"
+    "ăằắặẳẵèéẹẻẽ"
+    "êềếệểễìíịỉĩ"
+    "òóọỏõôồốộổỗ"
+    "ơờớợởỡùúụủũ"
+    "ưừứựửữỳýỵỷỹđ")
+
+# Vietnamese written without diacritics is the harder case, because it passes any
+# character check. These are function words: they carry no meaning on their own, which is
+# why they appear in almost every Vietnamese sentence and in almost no English one.
+_VN_WORDS = {
+    "biet", "buoc", "cach", "cai", "canh", "chinh", "chua", "chung", "cua", "cung", "dau",
+    "dieu", "dinh", "doi", "duoc", "duoi", "gian", "giua", "hanh", "hieu", "hoac", "khac",
+    "khong", "kia", "kien", "luon", "minh", "muoi", "muon", "nao", "neu", "ngan", "ngay",
+    "nghi", "nghia", "ngoai", "nguoi", "nguon", "nhat", "nhau", "nhieu", "nhu", "nhung",
+    "noi", "phai", "phan", "thang", "thoi", "tinh", "tren", "trong", "truoc", "truong",
+    "tuong", "vao", "viec", "vien", "voi", "xau", "xuong"
+}
+# Generated, not hand-picked. A candidate list of Vietnamese function words was
+# filtered against /usr/share/dict/words, so nothing here is also an English word.
+# Two hand-written attempts flagged 165 and then 2250 of 2577 existing English
+# records, because `day`, `them`, `the` and `it` are Vietnamese spellings too. A
+# gate that fires on correct work is a gate somebody switches off.
+
+_MIN_VN_HITS = 2
+
+
+# An apostrophe is not an opening quote. Pairing it as one made `owner's brief - 'khong
+# phai...'` close at the wrong mark and leave the quotation exposed, which is how a
+# correctly written record gets refused for the Vietnamese it was quoting.
+_QUOTED = re.compile(
+    r"(?<![A-Za-z0-9])'(?:\\.|[^'\n])*'"
+    r'|"(?:\\.|[^"\n])*"'
+    r"|`(?:\\.|[^`])*`", re.S)
+
+
+def _unquoted(text):
+    """Text with quoted spans removed. Quoting the owner in Vietnamese is evidence, and a
+    record that reproduces what they actually said is doing its job. The rule is that the
+    agent writes English, not that no Vietnamese may appear."""
+    return _QUOTED.sub(" ", text or "")
+
+
+def _has_diacritics(text):
+    """Vietnamese diacritics, or None. Certain enough to refuse on."""
+    bad = sorted({c for c in _unquoted(text).lower() if c in _VN_DIACRITICS})
+    return "has Vietnamese diacritics (%s)" % " ".join(bad[:6]) if bad else None
+
+
+def not_english(text):
+    """A reason the text is not English, or None.
+
+    Deterministic on purpose. A prose rule asking for English lost to precedent: one early
+    record had diacritics and a hundred more copied the house style they could see in the
+    index. A refusal at write time cannot be outvoted by precedent, which is the only
+    difference that matters here."""
+    lowered = _unquoted(text).lower()
+    if any(c in _VN_DIACRITICS for c in lowered):
+        return "has Vietnamese diacritics"
+    words = re.findall(r"[a-z]+", lowered)
+    hits = sorted({w for w in words if w in _VN_WORDS})
+    if len(hits) >= _MIN_VN_HITS:
+        return "reads as Vietnamese without diacritics (%s)" % ", ".join(hits[:6])
+    return None
+
+
+def cmd_new(args):
+    if len(args) < 2:
+        die('usage: viber new <type> "<title>" [--tags a,b] [--status open] '
+            '[--body "..." | --body-file PATH]')
+    rtype, title = args[0], args[1]
+    # A fact carries its value by reference, so it needs a source file and a symbol that
+    # `new` has no way to take. Accepting one here produces a record that can never
+    # resolve and reports itself STALE for the rest of the project's life.
+    if rtype == "fact":
+        die('a fact needs a source and a symbol: viber fact "<label>" <file> <symbol>')
+    if rtype not in TYPES:
+        die(f"type must be one of {', '.join(TYPES)}")
+    opts = parse_opts(args[2:])
+    status = opts.get("status", "open")
+    if status not in STATUSES:
+        die(f"status must be one of {', '.join(STATUSES)}")
+    today = now()
+    rid = claim_id()
+    os.makedirs(RECORDS, exist_ok=True)
+    rec = {"id": rid, "type": rtype, "status": status,
+           "tags": opts.get("tags", ""), "title": title,
+           "created": today, "updated": today,
+           "applies_to": f"[{opts.get('applies_to', '')}]" if opts.get("applies_to") else "",
+           "_body": read_body(opts),
+           }
+    # Two different confidences, so two different responses. Diacritics are certain, and
+    # a certain fault is worth refusing at the only moment it is cheap to fix. A word list
+    # is a guess, and refusing on a guess is how a gate gets switched off: it fires on
+    # correct work, and the next person routes around it. So the guess does not block. It
+    # names what it saw, which is the thing the writer can settle for free, because the
+    # writer is the only party that already knows what language it is writing in.
+    diacritics = _has_diacritics(title) or _has_diacritics(rec.get("_body") or "")
+    if diacritics:
+        die("refusing to write this record: %s.\n"
+            "Records are read back by every agent on this project, and this one is not "
+            "readable to most of them. Rewrite the title and body in English.\n"
+            "  rejected: %s" % (diacritics, title))
+    suspect = not_english(title) or not_english(rec.get("_body") or "")
+    finish_record(rec)
+
+    # A `question` raised while something is `doing` is the definition of the spec-gap
+    # signal: work started, and the brief did not answer. Deriving it removes the step
+    # where somebody has to remember to fire a trigger for their own interruption --
+    # which is the step that never happens.
+    if rtype == "question" and status != "done":
+        if any(r.get("status") == "doing" for r in all_records() if r.get("id") != rid):
+            _raise_trigger("spec-gap", f"{rid} was asked mid-task: {title}",
+                           "Derived: a question opened while work was in progress. "
+                           "The brief did not answer it. Decide whether the gap is "
+                           "worth a lesson, then close both records.")
+    regen()
+    print(f"{rid}  {rtype}/{status}  {title}")
+    if suspect:
+        print("  ? this record %s.\n"
+              "    You know what language you wrote it in and this check does not, so "
+              "settle it now: rewrite it in English, or leave it and `viber check` will "
+              "raise it every turn until you do." % suspect)
+
+
+def cmd_fact(args):
+    """Register a fact by where it lives, not by its value. The value is resolved from
+    source on every regen, so it is current in context without anyone remembering to
+    update it. This is the cheap structural cure for stale context: prefer it over
+    typing a value into a note, which no model reliably re-verifies."""
+    if len(args) < 3:
+        die('usage: viber fact "<label>" <file> <symbol>   e.g. viber fact "dev port" src/config.ts PORT')
+    label, src, sym = args[0], args[1], args[2]
+    today = now()
+    rid = claim_id()
+    os.makedirs(RECORDS, exist_ok=True)
+    rec = {"id": rid, "type": "fact", "status": "open", "tags": "",
+           "title": label, "created": today, "updated": today,
+           "source": src, "symbol": sym,
+           "_body": f"Value lives in {src} at `{sym}`. Not copied here on purpose: "
+                    f"state resolves it from source on every regen, so it cannot go stale."}
+    finish_record(rec)
+    regen()
+    _, val, _ = resolve_fact(rec)
+    print(f"{rid}  fact  {label} -> {val}")
+
+
+def cmd_set(args):
+    if len(args) < 2:
+        die("usage: viber set <id> <status>")
+    rec = find(args[0])
+    status = args[1]
+    if status not in STATUSES:
+        die(f"status must be one of {', '.join(STATUSES)}")
+    was = rec.get("status")
+    rec["status"] = status
+    rec["updated"] = now()
+    write_record(rec)
+    if was == "done" and status in ("open", "doing"):
+        _raise_trigger("rework", f"{rec['id']} was reopened after being done",
+                       f"{rec['id']} {rec.get('title', '')}")
+    regen()
+    print(f"{rec['id']} -> {status}")
+
+
+def cmd_list(args):
+    opts = parse_opts(args)
+    recs = all_records()
+    if "status" in opts:
+        recs = [r for r in recs if r.get("status") == opts["status"]]
+    if "type" in opts:
+        recs = [r for r in recs if r.get("type") == opts["type"]]
+    if "tag" in opts:
+        recs = [r for r in recs if opts["tag"] in tags_of(r)]
+    for r in recs:
+        print(f"{r.get('id'):<7} [{r.get('type')}/{r.get('status')}] {r.get('title', '')}")
+    if not recs:
+        print("(none)")
+
+
+def cmd_show(args):
+    if not args:
+        die("usage: viber show <id>")
+    r = find(args[0])
+    print(f"{r.get('id')} [{r.get('type')}/{r.get('status')}] {r.get('title', '')}")
+    print(f"tags: {', '.join(tags_of(r))}   updated: {day(r.get('updated'))}")
+    print(f"file: {os.path.relpath(r['_path'], ROOT)}\n")
+    print(r.get("_body") or "(no body)")
+
+
+def git_dirty():
+    try:
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode != 0:
+            return []
+        return [l for l in out.stdout.splitlines() if l.strip()]
+    except Exception:
+        return []
+
+
+ENV_STAMP = os.path.join(MEM, ".last-env-check")
+ENV_EVERY_HOURS = 4
+
+
+def env_due():
+    """A long session may run for days between restarts, so the environment cannot
+    only be checked when a session begins. Checking every turn would be waste, so it
+    runs on a clock. When nothing is due, this costs one stat call and no tokens."""
+    try:
+        age = (datetime.now() - datetime.fromtimestamp(os.path.getmtime(ENV_STAMP)))
+        return age.total_seconds() > ENV_EVERY_HOURS * 3600
+    except OSError:
+        return True
+
+
+def env_touch():
+    os.makedirs(MEM, exist_ok=True)
+    with open(ENV_STAMP, "w") as fh:
+        fh.write(now())
+
+
+# Credential shapes that are what they look like. Vendor prefixes first, because those
+# are unambiguous: nothing else in a source tree spells `ghp_` followed by forty
+# characters. The generic assignment rule comes last and is deliberately narrow, since a
+# warning that fires on correct work is a warning that gets switched off.
+_SECRET_PATTERNS = [
+    ("private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("GitHub token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
+    ("Slack token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b")),
+    ("Google API key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b")),
+    ("Stripe key", re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{20,}\b")),
+    ("OpenAI key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{32,}\b")),
+    ("Anthropic key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}\b")),
+    ("Figma token", re.compile(r"\bfigd_[A-Za-z0-9_\-]{20,}\b")),
+    ("JSON web token", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\."
+                                  r"[A-Za-z0-9_\-]{10,}\b")),
+    ("private key in JSON", re.compile(r'"private_key"\s*:\s*"-----BEGIN')),
+]
+
+# A name that means credential, assigned a long opaque literal. Anything short, anything
+# with a space, and anything that reads as a placeholder is skipped.
+_SECRET_ASSIGN = re.compile(
+    r"""(?i)\b(\w*(?:secret|token|password|passwd|api[_-]?key|access[_-]?key|"""
+    r"""private[_-]?key|client[_-]?secret|auth)\w*)\s*[:=]\s*["']([^"'\s]{16,})["']""")
+
+_PLACEHOLDER = re.compile(
+    r"(?i)^(x{4,}|\.{3,}|<.*>|\{\{.*\}\}|\$\{.*\}|your[_-]|changeme|placeholder|example|"
+    r"dummy|test[_-]?key|fake|redacted|null|none|todo|process\.env|import\.meta)")
+
+_SECRET_SKIP_EXT = {".lock", ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".ttf",
+                    ".woff", ".woff2", ".ico", ".mp4", ".mp3", ".wav"}
+_SECRET_SKIP_NAME = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Podfile.lock",
+                     "pubspec.lock", "Cargo.lock", "poetry.lock",
+                     # Firebase client configuration. These hold an API key that is
+                     # compiled into the shipped app and is public by design, restricted
+                     # by app id and signing certificate rather than by being hidden.
+                     # Flagging them is not a judgement call that got it wrong; it is a
+                     # documented fact about what the file is.
+                     "google-services.json", "GoogleService-Info.plist",
+                     "firebase_options.dart")
+
+def _looks_placeholder(value):
+    if _PLACEHOLDER.match(value):
+        return True
+    # A literal made of one repeated character, or with no digit and no case mix, reads
+    # as a stand-in rather than as a key.
+    return len(set(value)) <= 4
+
+
+def scan_secrets(paths):
+    """[(path, line number, what it looks like)] for files that appear to hold a live
+    credential.
+
+    Only ever called on files the working tree is changing, so a credential committed on
+    purpose stops being mentioned as soon as it is committed. There is no allowlist and
+    none is needed: an earlier version kept one, which meant a file listing the paths of
+    every file holding a credential, a map worth more to an attacker than the warning was
+    worth to anyone.
+
+    This never edits, never unstages and never blocks. The owner sometimes commits a
+    credential on purpose, and a tool that acts on its own guess is worse than one that
+    speaks up: it is right most of the time, and the times it is wrong it destroys work
+    silently. So it reports and the decision stays with the person."""
+    hits = []
+    for rel in paths:
+        base = os.path.basename(rel)
+        if (os.path.splitext(rel)[1] in _SECRET_SKIP_EXT or base in _SECRET_SKIP_NAME
+                or ".example" in base or ".sample" in base):
+            continue
+        path = os.path.join(ROOT, rel)
+        try:
+            if os.path.getsize(path) > 2_000_000:
+                continue
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            continue
+        for n, line in enumerate(lines, 1):
+            if len(line) > 4000:
+                continue
+            for label, pat in _SECRET_PATTERNS:
+                if pat.search(line):
+                    hits.append((rel, n, label))
+                    break
+            else:
+                m = _SECRET_ASSIGN.search(line)
+                if m and not _looks_placeholder(m.group(2)):
+                    hits.append((rel, n, "%s assigned a %d-character literal"
+                                 % (m.group(1), len(m.group(2)))))
+    return hits
+
+
+# A lockfile is committed; the tree it installs is not. That tree goes missing often --
+# a disk clean, a fresh clone, a branch that changed dependencies -- and the failure it
+# causes arrives wearing someone else's name. Here it surfaced as `pre-commit: npm test
+# failed` on a commit touching no TypeScript, which reads as a broken test and costs a
+# turn to trace back to a missing install. Saying it on the first prompt costs nothing.
+INSTALLS = {
+    "package-lock.json": ("node_modules", "npm ci"),
+    "pnpm-lock.yaml": ("node_modules", "pnpm install"),
+    "yarn.lock": ("node_modules", "yarn install"),
+    "bun.lockb": ("node_modules", "bun install"),
+    "pubspec.lock": (".dart_tool", "flutter pub get"),
+    "Podfile.lock": ("Pods", "pod install"),
+}
+
+
+def missing_deps():
+    out = []
+    for rel in _git("ls-files").splitlines():
+        spec = INSTALLS.get(os.path.basename(rel))
+        if not spec:
+            continue
+        folder, cmd = spec
+        here = os.path.dirname(rel)
+        if os.path.isdir(os.path.join(ROOT, here, folder)):
+            continue
+        where = here or "."
+        out.append(f"{os.path.join(where, folder)} is missing beside {rel}. Anything "
+                   f"needing it fails with an error naming something else, so run "
+                   f"`{cmd}` in {where} before building, testing or committing.")
+    return out
+
+
+# --- runtime an agent started and never stopped --------------------------------------
+# A Playwright browser was found on this machine nine days old, holding a 672MB profile,
+# because the turn that opened it ended without closing it. Dev servers accumulate the
+# same way. Prose in a rules file cannot fix either, because forgetting is the defect
+# itself, so this is reported every prompt beside the other notes.
+#
+# Nothing here is ever killed, and nothing is reported without an owner. The owner runs
+# several sessions against several projects at once, so an unattributed process is a
+# trap: closing one another project is still driving is worse than leaving it running.
+# Every line therefore names the project whose `claude` process is the ancestor, and
+# anything belonging to a different one is marked as not ours to close.
+
+AUTOMATION_MARK = re.compile(r"--remote-debugging-p|--enable-automation|ms-playwright|"
+                             r"puppeteer|--headless")
+BROWSER_BIN = re.compile(r"(Google Chrome|Chromium|firefox|Safari|msedge|headless_shell)")
+IDLE_AFTER = 600  # Seconds. Below this the turn that opened it may still be using it.
+
+
+def _etime(text):
+    """ps prints elapsed time as [[dd-]hh:]mm:ss."""
+    days, _, rest = text.rpartition("-")
+    try:
+        parts = [int(x) for x in rest.split(":")]
+    except ValueError:
+        return 0
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    return (int(days) * 86400 if days else 0) + parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def _dur(sec):
+    if sec >= 86400:
+        return f"{sec // 86400}d{sec % 86400 // 3600}h"
+    if sec >= 3600:
+        return f"{sec // 3600}h{sec % 3600 // 60}m"
+    return f"{sec // 60}m"
+
+
+def _run(cmd, timeout=8):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.stdout
+    except Exception:
+        return ""
+
+
+def _cwds(pids):
+    """Working directory per pid, in one lsof call rather than one per process."""
+    if not pids:
+        return {}
+    out, cur, res = _run(["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(pids)]), None, {}
+    for line in out.splitlines():
+        if line.startswith("p"):
+            cur = line[1:]
+        elif line.startswith("n") and cur:
+            res.setdefault(cur, line[1:])
+    return res
+
+
+def _procs():
+    """pid -> (ppid, elapsed seconds, command)."""
+    res = {}
+    for line in _run(["ps", "-axo", "pid=,ppid=,etime=,command="]).splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) == 4 and parts[0].isdigit():
+            res[parts[0]] = (parts[1], _etime(parts[2]), parts[3])
+    return res
+
+
+def _session_of(pid, procs):
+    """The `claude` process a runtime descends from, or None when it descends from none."""
+    seen = 0
+    while pid in procs and seen < 16:
+        ppid, _e, cmd = procs[pid]
+        if re.search(r"(^|/)claude( |$)", cmd):
+            return pid
+        pid, seen = ppid, seen + 1
+    return None
+
+
+def _is_server(cmd):
+    """A dev server, as opposed to a system daemon that also listens.
+
+    Keyed on the runtime rather than the port, because the ports in use on a developer's
+    machine are mostly AirPlay, Rapport and a game launcher, and a rule that reports those
+    teaches the reader to skip the whole section."""
+    if re.search(r"(^|/)(node|bun|deno)( |$)", cmd):
+        return True
+    if re.search(r"(^|/)(python3?|ruby|php)( |$)", cmd):
+        return bool(re.search(r"http\.server|uvicorn|gunicorn|flask|runserver|rails s", cmd))
+    return False
+
+
+def stray_runtime():
+    procs = _procs()
+    if not procs:
+        return []
+
+    browsers, servers = [], []
+    for pid, (_pp, age, cmd) in procs.items():
+        # One browser is many processes. Renderers inherit the parent's flags, and the
+        # crash handler carries the profile path without carrying --type=, so filtering
+        # on the automation marker alone reported a single browser three times. Only the
+        # executable under Contents/MacOS is the browser; the rest live in Frameworks.
+        if age < IDLE_AFTER or "--type=" in cmd or "Frameworks/" in cmd or "crashpad" in cmd:
+            continue
+        if BROWSER_BIN.search(cmd) and AUTOMATION_MARK.search(cmd):
+            browsers.append((pid, age, "browser"))
+
+    listening = {}
+    for line in _run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-u",
+                      str(os.getuid())]).splitlines()[1:]:
+        f = line.split()
+        if len(f) >= 9 and f[1] in procs and _is_server(procs[f[1]][2]):
+            listening.setdefault(f[1], set()).add(f[8].rsplit(":", 1)[-1])
+    for pid, ports in listening.items():
+        age = procs[pid][1]
+        if age >= IDLE_AFTER:
+            servers.append((pid, age, "port " + ", ".join(sorted(ports))))
+
+    found = browsers + servers
+    if not found:
+        return []
+
+    sessions = {pid: _session_of(pid, procs) for pid, _a, _w in found}
+    cwds = _cwds(sorted({s for s in sessions.values() if s}))
+    here = os.path.realpath(ROOT)
+
+    mine, theirs = [], []
+    for pid, age, what in sorted(found, key=lambda r: -r[1]):
+        sess = sessions.get(pid)
+        cwd = cwds.get(sess) if sess else None
+        label = f"{what} (pid {pid}, up {_dur(age)})"
+        if cwd and os.path.realpath(cwd) == here:
+            mine.append(label)
+        elif cwd:
+            theirs.append(f"{label} belongs to {os.path.basename(cwd)}")
+        else:
+            theirs.append(f"{label} has no session ancestor")
+
+    notes = []
+    if mine:
+        notes.append("Left running by this project, close what the current work no longer "
+                     "needs: " + "; ".join(mine))
+    if theirs:
+        notes.append("Running under another session or none, so NOT yours to close, and "
+                     "listed only so you do not mistake one for your own: "
+                     + "; ".join(theirs))
+    return notes
+
+
+def cmd_check(_args):
+    """Report what looks unfinished. Only objective signals, never judgment."""
+    notes = []
+    if env_due():
+        env_touch()
+        faults = check_environment()[0] + check_integrity()
+        if faults:
+            print(f"[viber check] the framework itself has {len(faults)} problem(s). "
+                  f"Work is still happening, but not the way it was designed to. "
+                  f"Fix what you can and raise only what is the owner's to fix:")
+            for f in faults[:5]:
+                print("  - " + f)
+            if len(faults) > 5:
+                print(f"  ... and {len(faults) - 5} more, run `viber doctor`")
+            print()
+    today = date.today().isoformat()
+    # Only surface work left hanging from an earlier day. A record touched today is
+    # work in progress, and nagging about it every turn is how a check gets ignored.
+    stale = [r for r in all_records()
+             if r.get("status") == "doing" and day(r.get("updated") or today) < today]
+    if stale:
+        notes.append(f"{len(stale)} record(s) left in progress from an earlier day: "
+                     + ", ".join(f"{r.get('id')} {r.get('title', '')}" for r in stale[:5]))
+    claims = truth_claims()
+    if claims:
+        broken = [c for c in claims
+                  if any(not resolve_ref(r)[0] for r in c["refs"])]
+        loose = [c for c in claims if not c["refs"]]
+        if broken or loose:
+            parts = []
+            if broken:
+                parts.append(f"{len(broken)} claim(s) whose anchor no longer resolves, "
+                             f"so the code moved and the document did not")
+            if loose:
+                parts.append(f"{len(loose)} claim(s) with no anchor, "
+                             f"so nothing can ever tell you when they go false")
+            notes.append("TRUTH.md: " + "; ".join(parts) + ". Run `viber truth check`.")
+        unread = unconfirmed_claims(claims)
+        if unread:
+            notes.append(
+                f"{len(unread)} truth claim(s) sit on code that moved since anyone read "
+                f"them: " + "; ".join(c["text"][:44] for c in unread[:3])
+                + ". The anchors resolve, which is not the same as the sentences being "
+                  "true. Read them, fix what is false, then `viber truth confirm`.")
+        touched = {l[3:].strip() for l in git_dirty()}
+        touched |= {l.strip() for l in _git("diff", "--name-only", "HEAD").splitlines()}
+        doubt = [c for c in claims
+                 if any(r.get("file") in touched for r in c["refs"] if r.get("file"))]
+        if doubt:
+            # A claim can resolve perfectly and still be false: the symbol is there, and
+            # what it does changed. Only the diff knows, so the diff is what raises it.
+            notes.append(
+                f"{len(doubt)} truth claim(s) anchored to files changed in this working "
+                f"tree. Their anchors still resolve, which is not the same as still being "
+                f"true. Run `viber truth surface` and reconcile each: "
+                + "; ".join(c["text"][:44] for c in doubt[:3]))
+    foreign = [r for r in all_records()
+               if r.get("status") not in ("done", "dropped")
+               and (not_english(r.get("title", ""))
+                    or not_english(r.get("_body") or ""))]
+    if foreign:
+        notes.append(
+            f"{len(foreign)} open record(s) do not read as English: "
+            + ", ".join(r.get("id", "") for r in foreign[:6])
+            + ". Every agent on this project reads these back. Rewrite them, or close "
+              "them if they no longer matter.")
+    # The graph is only consulted when somebody remembers to type it, and the question it
+    # answers well -- what else touches this -- matters at the moment of a change. So the
+    # change raises it, and the change is found without git, because an agent that commits
+    # mid-task empties the diff and a project may not be a repository at all.
+    touched, how, blind = changed_files(advance=True)
+    src_touched = [f for f in touched if os.path.splitext(f)[1] in PLANNED_EXT]
+    if src_touched:
+        _n, edges, _u, _p, _f = build_graph()
+        untouched, seen = [], set(touched)
+        for f in src_touched:
+            for a, b, _k in edges:
+                if b != f and not b.startswith(f + "::"):
+                    continue
+                # A document or a record that references the file is the truth layer's
+                # business and is reported there; repeating it reads as a second finding.
+                if a.startswith("doc:") or a.startswith("R-"):
+                    continue
+                if a not in seen and a not in untouched:
+                    untouched.append(a)
+        if untouched:
+            notes.append(
+                f"{len(src_touched)} source file(s) changed, and {len(untouched)} file(s) "
+                f"that import them are untouched: " + ", ".join(untouched[:6])
+                + (" ..." if len(untouched) > 6 else "")
+                + ". Run `viber graph deps` on what you changed before calling it done.")
+        elif blind:
+            notes.append("changed source detected, but " + "; ".join(blind)
+                         + ". The blast radius here is a guess, not a report.")
+    # Every file the working tree touches, not only source: a credential arrives in a
+    # config, a fixture or a downloaded JSON far more often than in code.
+    staged = {l[3:].strip() for l in git_dirty()}
+    staged |= {l.strip() for l in _git("diff", "--name-only", "HEAD").splitlines()
+               if l.strip()}
+    staged |= set(touched)
+    leaks = scan_secrets(sorted(f for f in staged if f))
+    if leaks:
+        notes.append(
+            f"{len(leaks)} line(s) look like a live credential: "
+            + "; ".join(f"{f}:{n} ({w})" for f, n, w in leaks[:4])
+            + (" ..." if len(leaks) > 4 else "")
+            + ". Show the owner the lines and ask. Do not remove, rewrite or unstage "
+              "anything on your own: they sometimes commit one deliberately.")
+    trig = open_triggers()
+    if trig:
+        notes.append(f"{len(trig)} learning signal(s) not processed yet: "
+                     + ", ".join(f"{r.get('id')} {r.get('title', '')}" for r in trig[:3])
+                     + ". Decide lesson or not, then close them.")
+    dirty = git_dirty()
+    # A repository with no commit yet is a project being set up, not work left behind.
+    # Nagging about the framework files themselves on turn one teaches the owner to
+    # ignore this check before it has said anything true.
+    if dirty and not _git("log", "-1", "--oneline"):
+        dirty = []
+    if dirty:
+        notes.append(f"{len(dirty)} uncommitted change(s): "
+                     + ", ".join(l[3:] for l in dirty[:5])
+                     + (" ..." if len(dirty) > 5 else ""))
+    # Committed but unpushed work is invisible from both sides: it is not dirty, so no
+    # check mentions it, and the owner cannot ask for a push nobody told them was
+    # pending. Unlike the in-progress filter above this is not limited to earlier days,
+    # because the work it lost sat unpushed for hours inside a single one. Nag risk is
+    # low: one command clears it, where a record needs a decision.
+    ahead = _git("rev-list", "--count", "@{u}..HEAD")
+    if ahead.isdigit() and int(ahead) > 0:
+        notes.append(f"{ahead} commit(s) committed but never pushed. A private remote is "
+                     f"not a gate; push them, or say what you are waiting for.")
+    notes.extend(missing_deps())
+    notes.extend(stray_runtime())
+    if notes:
+        print("[viber check] for you, not for the owner. Decide what each one needs,\n                do it, and only raise with the owner what genuinely needs their call:")
+        for n in notes:
+            print("  - " + n)
+    return 0
+
+
+def _ago(path):
+    if not os.path.exists(path):
+        return None
+    days = (date.today() - date.fromtimestamp(os.path.getmtime(path))).days
+    return "today" if days == 0 else f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def _git(*a):
+    try:
+        r = subprocess.run(["git"] + list(a), cwd=ROOT, capture_output=True,
+                           text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _newest(dirpath):
+    newest = 0
+    for root, dirs, files in os.walk(dirpath):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "node_modules"]
+        for f in files:
+            if f.startswith("."):
+                continue
+            try:
+                newest = max(newest, os.path.getmtime(os.path.join(root, f)))
+            except OSError:
+                pass
+    return newest
+
+
+AGENT_ROLES = ["analyst", "builder", "coder", "grunt", "reviewer"]
+SECRET_HINT = re.compile(r"(sk-[A-Za-z0-9]{16,}|gsk_[A-Za-z0-9]{16,}|figd_[A-Za-z0-9_-]{16,}"
+                         r"|AIza[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)")
+
+
+def _read(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def check_environment():
+    """Can the framework even work here. A silent no is the worst failure of all,
+    because everything looks normal while none of the machinery is running."""
+    broken, risk = [], []
+    if sys.version_info < (3, 8):
+        broken.append(f"Python is {sys.version.split()[0]}, the CLI needs 3.8 or newer. "
+                      f"Nothing here works until that is fixed. Needs the owner.")
+
+    cfg_path = os.path.join(ROOT, ".claude", "settings.json")
+    raw = _read(cfg_path)
+    if not raw:
+        broken.append("No .claude/settings.json, so no hooks run. The digest never loads "
+                      "at session start and nothing checks loose ends at the end.")
+    else:
+        try:
+            cfg = json.loads(raw)
+            hooks = cfg.get("hooks", {})
+            # Both go on UserPromptSubmit, because that is where hook output reaches
+            # the agent. Stop runs, prints, and nobody reads it, so a check wired there
+            # is inert while looking wired.
+            for event, cmd in (("SessionStart", "state"),
+                               ("UserPromptSubmit", "state"),
+                               ("UserPromptSubmit", "check")):
+                entries = json.dumps(hooks.get(event, []))
+                if "viber" not in entries or cmd not in entries:
+                    broken.append(f"The {event} hook does not run `viber {cmd}`. "
+                                  f"That part of the framework is inert.")
+            if "check" in json.dumps(hooks.get("Stop", [])):
+                broken.append("`viber check` is wired to the Stop hook, whose output the "
+                              "agent never sees. Move it to UserPromptSubmit.")
+        except ValueError as e:
+            broken.append(f".claude/settings.json is not valid JSON ({e}), so every hook "
+                          f"is ignored. Fix the file.")
+
+    for role in AGENT_ROLES:
+        f = os.path.join(ROOT, ".claude", "agents", role + ".md")
+        body = _read(f)
+        if not body:
+            broken.append(f"Agent definition missing: {role}.md. Work routed to it runs on "
+                          f"the orchestrator's model instead, which is the expensive one.")
+        elif not re.search(r"^model:\s*\S+", body, re.M):
+            broken.append(f"{role}.md has no `model:` line, so it inherits the orchestrator "
+                          f"model. The whole point of the split is lost for that role.")
+
+    if not os.path.isdir(os.path.join(ROOT, ".git")):
+        risk.append("Not a git repository. Nothing is recoverable and the uncommitted "
+                    "work check cannot see anything. Needs the owner.")
+    else:
+        ign = _read(os.path.join(ROOT, ".gitignore"))
+        if ".env" not in ign:
+            risk.append(".gitignore does not cover .env, so a secret can be committed by "
+                        "accident. Add it.")
+    return broken, risk
+
+
+def check_integrity():
+    """Is the data still sound. These are the failures that quietly poison every
+    number the framework reports."""
+    out = []
+    recs = all_records()
+    ids = [r.get("id") for r in recs]
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    if dupes:
+        out.append(f"Duplicate record ids: {', '.join(dupes)}. Two writes claimed the same "
+                   f"id, so `set` and `show` are ambiguous for them. Renumber the newer one.")
+    bad = [r.get("id") or os.path.basename(r["_path"]) for r in recs
+           if r.get("status") not in STATUSES or r.get("type") not in TYPES]
+    if bad:
+        out.append(f"{len(bad)} record(s) with an unknown type or status: {', '.join(bad[:5])}. "
+                   f"Usually a hand edit. They are invisible to every query that filters.")
+    fps = [r.get("fingerprint") for r in recs if r.get("fingerprint")]
+    fdupes = {f for f in fps if fps.count(f) > 1}
+    if fdupes:
+        out.append(f"{len(fdupes)} defect fingerprint(s) exist on more than one record, so a "
+                   f"repeat will not be counted. Merge them.")
+    for name in ("state.md", "index.md"):
+        pth = os.path.join(MEM, name)
+        if not os.path.exists(pth):
+            out.append(f"{name} is missing. Run `viber state` to rebuild it.")
+        elif recs:
+            newest = max(os.path.getmtime(r["_path"]) for r in recs)
+            if os.path.getmtime(pth) < newest - 5:
+                out.append(f"{name} is older than the records it summarises, so something "
+                           f"wrote a record without regenerating. Run `viber state`.")
+    leaks = []
+    for folder in (RECORDS, DOCS):
+        if not os.path.isdir(folder):
+            continue
+        for f in os.listdir(folder):
+            if f.endswith(".md") and SECRET_HINT.search(_read(os.path.join(folder, f))):
+                leaks.append(f)
+    if leaks:
+        out.append(f"Something that looks like a live credential is written into "
+                   f"{', '.join(leaks[:3])}. Remove it and rotate the key. Needs the owner.")
+    return out
+
+
+def cmd_doctor(_args):
+    """Health report for the orchestrator. Fix what you can, raise only what needs
+    the owner, and never hand this output to them verbatim."""
+    recs = all_records()
+    print("[viber doctor] for you, not for the owner. Act on what you can, and raise "
+          "only what genuinely needs their decision.\n")
+
+    broken, risk = check_environment()
+    integrity = check_integrity()
+
+    counts = {}
+    for r in recs:
+        counts[r.get("status", "?")] = counts.get(r.get("status", "?"), 0) + 1
+    last_rec = day(max((r.get("updated", "") for r in recs), default=""))
+    print("\nMemory")
+    print(f"  records: {len(recs)}  ({', '.join(f'{k} {v}' for k, v in sorted(counts.items())) or 'none'})")
+    print(f"  last written: {last_rec or 'never'}")
+
+    drift = []
+    if last_rec:
+        n = len([l for l in _git("log", f"--since={last_rec}", "--oneline").splitlines() if l])
+        print(f"  commits since then: {n}")
+        if n >= 10:
+            drift.append(f"{n} commits since the last record. Work is happening and nothing "
+                         f"is being remembered, so the decisions behind it are being lost.")
+    elif _git("log", "--oneline"):
+        drift.append("Commits exist but no records at all. Memory is not being used.")
+
+    lessons = [r for r in recs if r.get("type") == "lesson"]
+    live_l = [r for r in lessons if r.get("status") != "dropped"]
+    if lessons:
+        never = [r for r in live_l if not as_int(r.get("hits"), 0)]
+        print(f"\nLearning\n  lessons: {len(live_l)} live, {len(lessons) - len(live_l)} retired")
+        print(f"  never recalled: {len(never)}")
+        if len(live_l) >= 25 and len(lessons) == len(live_l):
+            drift.append(f"{len(live_l)} lessons and none retired. Lessons are meant to be "
+                         f"promoted into rules and then deleted, so nothing is being promoted.")
+        if len(never) >= 10:
+            # A third explanation, and on a large store it is usually the true one: recall
+            # returns a handful and the store holds hundreds, so most of it can never come
+            # back however well it is written. Offering only the first two explanations
+            # sends the reader to prune good lessons.
+            by_role = {}
+            for r in live_l:
+                for role in re.sub(r"[\[\]]", "", r.get("applies_to", "")).split(","):
+                    role = role.strip()
+                    if role:
+                        by_role[role] = by_role.get(role, 0) + 1
+            deepest = max(by_role.values()) if by_role else 0
+            if deepest > 20:
+                worst = max(by_role, key=by_role.get)
+                drift.append(f"{len(never)} lessons have never been recalled, and the store "
+                             f"is the reason: {deepest} of them are scoped to `{worst}` "
+                             f"while a recall returns a handful. Most of this cannot come "
+                             f"back however well it is written. Promote the ones that keep "
+                             f"proving themselves into a rule or a check, then delete them.")
+        if len(never) >= 10 and not any("the store is the reason" in d for d in drift):
+            drift.append(f"{len(never)} lessons have never been recalled: either they are "
+                         f"scoped too narrowly to ever match, or nothing asks before it acts.")
+    trig = open_triggers()
+    if trig:
+        print(f"  unprocessed signals: {len(trig)} (oldest {day(min(r.get('created', '') for r in trig))})")
+        if len(trig) >= 5:
+            drift.append(f"{len(trig)} learning signals are piling up unprocessed.")
+
+
+    src = os.path.join(ROOT, "src")
+    design = os.path.join(DOCS, "DESIGN.md")
+    if os.path.isdir(src) and os.path.exists(design):
+        gap = int((_newest(src) - os.path.getmtime(design)) / 86400)
+        if gap >= 14:
+            drift.append(f"The code has moved on {gap} days past the last design update. "
+                         f"The plan probably describes a product that no longer exists.")
+
+    print("\nGit")
+    print(f"  last commit: {_git('log', '-1', '--pretty=%cr: %s') or 'none'}")
+    # Split source churn from memory churn: records are written constantly and staged in
+    # batches, so a large uncommitted count reads as normal noise. That is exactly how a
+    # whole task's implementation sat unlanded through two green gate runs. A green gate
+    # says the code is right; it never says the code exists anywhere but this filesystem.
+    dirty = git_dirty()
+    mem = [l for l in dirty if "/.viber/" in l or l[3:].startswith(".viber/")]
+    src = [l for l in dirty if l not in mem]
+    print(f"  uncommitted files: {len(dirty)}"
+          + (f"  ({len(src)} source, {len(mem)} memory)" if mem and src else ""))
+    if len(src) >= 10:
+        print(f"  ^ {len(src)} SOURCE files uncommitted. Work can be verified, reported and"
+              " accepted while still being one power cut from gone.")
+    _ahead = _git("rev-list", "--count", "@{u}..HEAD")
+    print(f"  unpushed commits: {_ahead if _ahead.isdigit() else 'no upstream set'}")
+
+    if broken:
+        print("\nBroken, the framework is not running as designed:")
+        for b in broken:
+            print("  - " + b)
+    if integrity:
+        print("\nData integrity:")
+        for i in integrity:
+            print("  - " + i)
+    if risk:
+        print("\nRisks:")
+        for r in risk:
+            print("  - " + r)
+    if drift:
+        print("\nPractice drifting:")
+        for d in drift:
+            print("  - " + d)
+    if not (broken or integrity or risk or drift):
+        print("\nNothing looks wrong.")
+
+
+def cmd_state(_args):
+    # Both files, because this is the remedy doctor names and the rules point at: "if they
+    # look wrong, run viber state". Regenerating only state.md left the one fault it was
+    # prescribed for, a stale index.md, alive after being told to run it.
+    regen()
+    print(gen_state())
+
+
+def cmd_index(_args):
+    n = gen_index()
+    print(f"index regenerated: {n} record(s)")
+
+
+def cmd_init(_args):
+    for d in (RECORDS, DOCS, os.path.join(ROOT, "src")):
+        os.makedirs(d, exist_ok=True)
+    keep = os.path.join(ROOT, "src", ".gitkeep")
+    if not os.path.exists(keep):
+        open(keep, "w").close()
+    regen()
+    print(f"viber initialised at {ROOT}")
+
+
+def as_int(v, default):
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_opts(argv):
+    opts, i = {}, 0
+    while i < len(argv):
+        a = argv[i]
+        if a.startswith("--") and i + 1 < len(argv):
+            opts[a[2:]] = argv[i + 1]
+            i += 2
+        else:
+            i += 1
+    return opts
+
+
+
+# ---------- truth layer and relation graph ----------
+#
+# TRUTH.md holds what is true about this project right now, and nothing else. Two tests
+# decide admission: it can be checked against a file in this repo without asking anyone,
+# and it stays true when nobody is here to be asked. History, intent, state outside the
+# repo, and the agent's own uncertainty all fail one of those and belong in records.
+#
+# The anchor is what makes the file checkable. A claim carrying {% ref %} can be compared
+# with source on every run; a claim naming nothing cannot be tied to a diff and rots in
+# silence. Validation lives here rather than in a Markdoc toolchain so the CLI stays
+# stdlib-only.
+
+TRUTH = os.path.join(DOCS, "TRUTH.md")
+REF_RE = re.compile(r"\{%\s*ref\s+([^%]*?)%\}")
+ATTR_RE = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
+RECORD_RE = re.compile(r"\bR-\d{3}\b")
+
+
+def parse_refs(text):
+    """Every {% ref %} in order, as dicts. Unknown attributes are kept, not dropped:
+    silently ignoring an attribute is how a typo becomes an unanchored claim."""
+    out = []
+    for m in REF_RE.finditer(text):
+        out.append(dict(ATTR_RE.findall(m.group(1))))
+    return out
+
+
+def truth_claims():
+    """Claims are lines. A line with text and no ref is unanchored and is reported, since
+    that is the shape that rots. Headings, code fences, list scaffolding and blank lines
+    are not claims."""
+    if not os.path.exists(TRUTH):
+        return None
+    claims, fence, started = [], False, False
+    block, block_line = [], 0
+
+    def flush():
+        if block:
+            text = " ".join(block)
+            claims.append({"line": block_line, "text": text, "refs": parse_refs(text)})
+        del block[:]
+
+    for n, raw in enumerate(open(TRUTH, encoding="utf-8"), 1):
+        line = raw.rstrip("\n")
+        s = line.strip()
+        if s.startswith("```"):
+            flush()
+            fence = not fence
+            continue
+        if s.startswith("##"):
+            flush()
+            # Prose before the first section is the document explaining itself, not a
+            # claim about the project. Flagging it as unanchored trains the reader to
+            # ignore the warning, which is the failure the warning exists to prevent.
+            started = True
+            continue
+        if not started or fence or not s or s.startswith("#") or s.startswith(">") \
+                or set(s) <= set("-|: "):
+            # A blank line ends a claim. Anything else here is scaffolding, not prose.
+            flush()
+            continue
+        # A claim is a paragraph, not a line. Requiring one line each put the anchor on a
+        # different line from the sentence it anchors the moment the prose wrapped, and
+        # this file is meant to be read by a person, so it will wrap.
+        if not block:
+            block_line = n
+        block.append(s)
+    flush()
+    return claims
+
+
+def resolve_ref(ref):
+    """(ok, detail). 'ok' is only True when the anchor was found. Anything else says why,
+    because a check that cannot tell 'absent' from 'not looked at' is worse than none."""
+    rec = ref.get("record")
+    if rec:
+        hit = [r for r in all_records() if r.get("id") == rec]
+        return (True, rec) if hit else (False, f"record {rec} does not exist")
+    src = ref.get("file")
+    if not src:
+        return (False, "ref names neither a file nor a record")
+    path = os.path.join(ROOT, src)
+    if not os.path.exists(path):
+        return (False, f"{src} is not on the tree")
+    sym = ref.get("symbol")
+    if not sym:
+        return (True, src)
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            hits = [ln.strip() for ln in fh if sym in ln]
+    except OSError as e:
+        return (False, f"cannot read {src} ({e})")
+    if not hits:
+        return (False, f"'{sym}' not found in {src}")
+    return (True, hits[0])
+
+
+TRUTH_LOCK = os.path.join(DOCS, "truth.lock")
+
+
+def _claim_key(claim):
+    """Identity from the text, not the line number, so editing the file above a claim
+    does not invalidate it."""
+    return hashlib.sha1(" ".join(claim["text"].split()).encode("utf-8")).hexdigest()[:12]
+
+
+def _claim_neighbourhood(claim):
+    """Files whose change could make this claim false.
+
+    An anchor proves a symbol exists. It cannot prove the sentence around it is still
+    true, and the two come apart in the case this was built for: a claim reading "the
+    crowd bar is full exactly at the enemy ceiling" stayed green while a change to a
+    different file made it false. The symbol was still there.
+
+    So the neighbourhood is wider than the anchor: the anchored file, whatever it imports
+    and whatever imports it, and any file repeating a literal from the anchored value.
+    That last one carries no import edge, which is exactly why it is the one that gets
+    missed."""
+    files = set()
+    for ref in claim["refs"]:
+        f = ref.get("file")
+        if not f:
+            continue
+        files.add(f)
+    if not files:
+        return files
+    try:
+        _n, edges, _u, parsed, _f = build_graph()
+    except Exception:
+        return files
+    for f in list(files):
+        for a, b, _k in edges:
+            if a.startswith(("doc:", "R-")):
+                continue
+            if b == f or b.startswith(f + "::"):
+                files.add(a.split("::")[0])
+            if a == f:
+                files.add(b.split("::")[0])
+    for ref in claim["refs"]:
+        if ref.get("file") and ref.get("symbol"):
+            target = "%s::%s" % (ref["file"], ref["symbol"])
+            for rel, _lits in value_echo(target, parsed):
+                files.add(rel)
+    return {f for f in files if os.path.isfile(os.path.join(ROOT, f))}
+
+
+def claim_fingerprint(claim):
+    """One hash over everything that could falsify the claim."""
+    parts = []
+    for ref in sorted(claim["refs"], key=lambda r: str(sorted(r.items()))):
+        ok, detail = resolve_ref(ref)
+        parts.append("%s:%s" % (ok, detail))
+    for rel in sorted(_claim_neighbourhood(claim)):
+        try:
+            st = os.stat(os.path.join(ROOT, rel))
+            parts.append("%s:%d:%d" % (rel, st.st_size, int(st.st_mtime)))
+        except OSError:
+            parts.append("%s:gone" % rel)
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _lock_read():
+    out = {}
+    try:
+        with open(TRUTH_LOCK, encoding="utf-8") as fh:
+            for line in fh:
+                if "\t" in line:
+                    k, v = line.rstrip("\n").split("\t", 1)
+                    out[k] = v
+    except OSError:
+        pass
+    return out
+
+
+def _lock_write(pairs):
+    os.makedirs(DOCS, exist_ok=True)
+    with open(TRUTH_LOCK, "w", encoding="utf-8") as fh:
+        fh.write("# Written by `viber truth confirm`. One line per claim: key\tfingerprint.\n")
+        fh.write("# A claim is unconfirmed until somebody reads it against the code and\n")
+        fh.write("# runs confirm. This file records that somebody did, and when the code\n")
+        fh.write("# around the claim moves, the fingerprint stops matching and it is\n")
+        fh.write("# unconfirmed again. It says a person looked, never that they were right.\n")
+        for k, v in sorted(pairs.items()):
+            fh.write("%s\t%s\n" % (k, v))
+
+
+def unconfirmed_claims(claims):
+    """Claims whose neighbourhood moved since anyone last read them."""
+    lock = _lock_read()
+    out = []
+    for c in claims:
+        if not c["refs"]:
+            continue
+        key = _claim_key(c)
+        if lock.get(key) != claim_fingerprint(c):
+            out.append(c)
+    return out
+
+
+def cmd_truth(args):
+    sub = args[0] if args else "check"
+    claims = truth_claims()
+    if claims is None:
+        die(f"no truth file. Expected {os.path.relpath(TRUTH, ROOT)}")
+
+    if sub == "check":
+        broken, loose = [], []
+        for c in claims:
+            if not c["refs"]:
+                loose.append(c)
+                continue
+            for ref in c["refs"]:
+                ok, detail = resolve_ref(ref)
+                if not ok:
+                    broken.append((c, detail))
+        print(f"{len(claims)} claim(s) in {os.path.relpath(TRUTH, ROOT)}")
+        for c, why in broken:
+            print(f"  BROKEN  line {c['line']}: {why}")
+            print(f"          {c['text'][:96]}")
+        for c in loose:
+            print(f"  UNANCHORED  line {c['line']}: {c['text'][:80]}")
+        stale = unconfirmed_claims(claims)
+        for c in stale:
+            print(f"  UNCONFIRMED  line {c['line']}: {c['text'][:74]}")
+        if stale:
+            print(f"  {len(stale)} claim(s) anchored to code that moved since anyone read "
+                  f"them. An anchor that resolves is not a claim that is true. Read each "
+                  f"against the code, fix what is now false, then `viber truth confirm`.")
+        if not broken and not loose and not stale:
+            print("  every claim resolves, and every claim has been read since its code "
+                  "last moved")
+        elif not broken and not loose:
+            print("  every claim resolves against source")
+        # An unanchored claim fails too. If it cannot be anchored, either the decision
+        # was never recorded (write the record and ref it) or it is intent rather than
+        # truth (it belongs in a record). There is no third case, so there is no hatch.
+        return 1 if (broken or loose) else 0
+
+    if sub == "surface":
+        # Which claims does this diff put in doubt? The diff decides, so nobody has to
+        # know which parts of the document matter.
+        changed, how, blind = changed_files()
+        changed = set(changed)
+        if blind:
+            print("  LIMITED: " + "; ".join(blind))
+        if not changed:
+            print("no changed file detected via " + (", ".join(how) or "nothing")
+                  + ". That is not the same as nothing having changed.")
+            return 0
+        hit = []
+        for c in claims:
+            for ref in c["refs"]:
+                f = ref.get("file")
+                if f and f in changed:
+                    hit.append((c, f))
+                    break
+        print(f"{len(changed)} changed file(s), {len(hit)} claim(s) to reconcile")
+        for c, f in hit:
+            print(f"  line {c['line']}  ({f})  {c['text'][:80]}")
+        return 0
+
+    if sub == "gaps":
+        # The check nobody else performs: not "is what we wrote true" but "what does the
+        # code contain that we wrote nothing about". A truth file cannot report its own
+        # silence, and silence is where the expensive surprises live.
+        covered = {r.get("file") for c in claims for r in c["refs"] if r.get("file")}
+        groups, hit = {}, {}
+        for rel in candidate_sources():
+            parts = rel.split(os.sep)
+            key = os.sep.join(parts[:2]) if len(parts) > 2 else parts[0]
+            groups[key] = groups.get(key, 0) + 1
+            if rel in covered:
+                hit[key] = hit.get(key, 0) + 1
+        rows = sorted(groups.items(), key=lambda kv: -kv[1])
+        silent = [(k, n) for k, n in rows if not hit.get(k)]
+        print(f"{len(covered)} file(s) anchored by {len(claims)} claim(s), across "
+              f"{len(rows)} area(s) of the tree.")
+        print(f"{len(silent)} area(s) no claim touches at all:")
+        for k, n in silent[:20]:
+            print(f"  {n:>4} file(s)  {k}")
+        if len(silent) > 20:
+            print(f"  ... and {len(silent) - 20} more")
+        print("\nAn area with no claim is not an area with nothing to say. It is an area "
+              "nobody has said anything about, which reads the same from here and does "
+              "not read the same in six months.")
+        return 0
+
+    if sub == "confirm":
+        # The one thing a tool cannot do is read a sentence and decide it is still true.
+        # So it records that somebody did. This is an assertion by whoever runs it, not a
+        # verification: it is worth exactly as much as their reading was.
+        pairs = {_claim_key(c): claim_fingerprint(c) for c in claims if c["refs"]}
+        _lock_write(pairs)
+        print(f"{len(pairs)} claim(s) recorded as read against the current code.")
+        print("This states that you read them, not that they are correct.")
+        return 0
+
+    die("usage: viber truth [check|surface|confirm|gaps]")
+
+
+# ---------- code graph ----------
+
+# Hand-written, on purpose. A third-party parser would mean a dependency per language in a
+# tool whose value is being there on a bare machine, and the three grammars that matter
+# here are TypeScript/JavaScript, Dart and Python. Python gets the real thing from the
+# standard library. The other two get a tokenizer that blanks comments and string literals
+# first, then reads declarations and imports out of what is left. That is weaker than an
+# AST and stronger than grep, and the difference from grep is that it knows which files it
+# failed on and says so.
+
+_JS_EXT = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
+_RESOLVE_EXT = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".dart", ".py"]
+_IDENT = re.compile(r"\b[A-Za-z_$][A-Za-z0-9_$]*\b")
+_PY_TRIPLES = ('"""', "'" * 3)
+
+
+# A slash starts a regex where a value is expected and divides where one just ended.
+# There is no way to tell without the parse state, so this looks at the last significant
+# character, which is the standard heuristic and is wrong only on code that is already
+# ambiguous to a reader.
+_REGEX_AFTER = set("([{,;=:!&|?+-*%~^<>") | {None}
+_REGEX_KEYWORD = ("return", "typeof", "case", "in", "of", "delete", "void", "instanceof",
+                  "do", "else", "yield", "await")
+
+
+def _regex_here(out):
+    """True when a `/` at this point opens a regular expression."""
+    i = len(out) - 1
+    while i >= 0 and out[i] in " \t\n":
+        i -= 1
+    if i < 0:
+        return True
+    c = out[i]
+    if c == "<":
+        # `</span>` is a JSX closing tag, not a regular expression. `<` otherwise sits in
+        # the set below because `a < /re/.test(b)` is real, but `</` is only ever JSX in
+        # a file this parser reads, and reading it as a regex ate the rest of three .tsx
+        # files in one project.
+        return False
+    if c in "!?":
+        # TypeScript writes `a.y[i]! / cell` and `a?.b / c`, where the mark is a postfix
+        # assertion and the slash is division. As a prefix (`!/re/.test(x)`) it is
+        # negation and a regex follows. What precedes the mark is the only difference,
+        # and reading it wrong ate the rest of two real files as a regex literal.
+        j = i - 1
+        while j >= 0 and out[j] in " \t":
+            j -= 1
+        prev = out[j] if j >= 0 else None
+        return not (prev and (prev.isalnum() or prev in "_$)]\"'`"))
+    if c in _REGEX_AFTER:
+        return True
+    word, j = [], i
+    while j >= 0 and (out[j].isalnum() or out[j] == "_"):
+        word.append(out[j])
+        j -= 1
+    return "".join(reversed(word)) in _REGEX_KEYWORD
+
+
+def _eat_regex(text, i, out):
+    """Blank a regex literal and its flags. A character class holds an unmatched bracket
+    and an apostrophe often enough that leaving these as code corrupted the rest of the
+    file: three TypeScript files in two real projects, where a `[^\\s(]` swallowed every
+    declaration after it."""
+    n = len(text)
+    out.append(" ")
+    i += 1
+    klass = False
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            out.append("  ")
+            i += 2
+            continue
+        if c == "\n":
+            return None  # a regex does not span lines, so this was division after all
+        if c == "[":
+            klass = True
+        elif c == "]":
+            klass = False
+        elif c == "/" and not klass:
+            out.append(" ")
+            i += 1
+            while i < n and text[i].isalpha():
+                out.append(" ")
+                i += 1
+            return i
+        out.append(" ")
+        i += 1
+    return None
+
+
+def _strip_literals(text, hashes=False, keep_strings=False, regex=False):
+    """Blank out comments and string bodies, keeping length and line breaks so anything
+    found afterwards is code. Done character by character because a regex pass cannot tell
+    a quote inside a comment from one that opens a string, and that mistake silently
+    swallows the rest of the file.
+
+    `keep_strings` leaves string bodies alone. Import extraction needs them: a module
+    specifier IS a string literal, and blanking it leaves `from ""`, which silently
+    produces a graph with no code edges at all -- the exact shape of a false all-clear
+    this tool exists to prevent."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/" and not hashes:
+            while i < n and text[i] != "\n":
+                out.append(" ")
+                i += 1
+        elif c == "/" and nxt == "*" and not hashes:
+            while i < n and not (text[i] == "*" and i + 1 < n and text[i + 1] == "/"):
+                out.append("\n" if text[i] == "\n" else " ")
+                i += 1
+            out.append("  ")
+            i += 2
+        elif c == "#" and hashes:
+            while i < n and text[i] != "\n":
+                out.append(" ")
+                i += 1
+        elif c == "/" and regex and _regex_here(out):
+            got = _eat_regex(text, i, out)
+            if got is None:
+                out.append(c)
+                i += 1
+            else:
+                i = got
+        elif c in "\"'`" and not keep_strings:
+            q = c
+            triple = hashes and text[i:i + 3] in _PY_TRIPLES
+            end = q * 3 if triple else q
+            i += len(end)
+            out.append(" " * len(end))
+            while i < n:
+                if text[i] == "\\":
+                    out.append("  ")
+                    i += 2
+                    continue
+                if q == "`" and text[i:i + 2] == "${":
+                    # An interpolation is code, not text. Blanking it hid every use of a
+                    # symbol that only ever appears inside a template string, which then
+                    # read as an export nobody imports.
+                    out.append("  ")
+                    i += 2
+                    depth = 1
+                    while i < n and depth:
+                        if text[i] == "{":
+                            depth += 1
+                        elif text[i] == "}":
+                            depth -= 1
+                            if not depth:
+                                out.append(" ")
+                                i += 1
+                                break
+                        out.append(text[i])
+                        i += 1
+                    continue
+                if text[i:i + len(end)] == end:
+                    out.append(" " * len(end))
+                    i += len(end)
+                    break
+                if not triple and text[i] == "\n" and q != "`":
+                    break  # unterminated on this line; do not eat the rest of the file
+                out.append("\n" if text[i] == "\n" else " ")
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+_JS_DECL = re.compile(
+    r"(?:^|\n)\s*(?:export\s+(?:default\s+)?)?"
+    r"(?:async\s+)?(?:function\*?|class|const|let|var|enum|interface|type)\s+"
+    r"([A-Za-z_$][\w$]*)")
+_JS_FROM = re.compile(
+    r"""(?:^|\n)\s*(?:import|export)\b([^;\n]*?)\bfrom\s*['"]([^'"]+)['"]""")
+_JS_BARE = re.compile(r"""\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)""")
+_JS_NAMED = re.compile(r"\{([^}]*)\}")
+_JS_STAR = re.compile(r"\*\s+as\s+([A-Za-z_$][\w$]*)")
+
+_DART_TYPE = re.compile(
+    r"(?:^|\n)\s*(?:abstract\s+|base\s+|final\s+|sealed\s+)*"
+    r"(?:class|enum|mixin|extension|typedef)\s+([A-Za-z_]\w*)")
+_DART_TOP = re.compile(
+    r"(?:^|\n)(?:final|const|var)\s+(?:[\w<>,\s?]+\s+)?([A-Za-z_]\w*)\s*=")
+_DART_IMPORT = re.compile(
+    r"""(?:^|\n)\s*(?:import|export|part)\s+['"]([^'"]+)['"]([^;\n]*)""")
+_DART_SHOW = re.compile(r"\bshow\s+([\w\s,]+)")
+
+
+_ALIASES = {}
+
+
+def _ts_aliases(from_rel):
+    """The `paths` map from the nearest tsconfig/jsconfig above this file.
+
+    A path alias is the default import style in a Next.js app. Treating it as a package
+    specifier and dropping it left a 55-file project with 38 edges and every component
+    reported as imported by nobody, which is a false all-clear dressed as a finding.
+
+    Reading only the repository root is the same bug one level up. A repo holding a web
+    app and a mobile app has two tsconfigs, both mapping `@/*`, each to its own directory.
+    Resolving every `@/` against the root silently dropped every edge inside the nested
+    app: one project reported a symbol with three call sites as imported by nobody. So the
+    lookup walks up from the importing file and uses the first config it meets."""
+    d = os.path.dirname(from_rel)
+    while True:
+        if d in _ALIASES:
+            return _ALIASES[d]
+        found = None
+        for name in ("tsconfig.json", "jsconfig.json"):
+            path = os.path.join(ROOT, d, name) if d else os.path.join(ROOT, name)
+            if not os.path.isfile(path):
+                continue
+            try:
+                raw = open(path, encoding="utf-8", errors="ignore").read()
+                raw = re.sub(r"//[^\n]*", "", raw)
+                raw = re.sub(r",(\s*[}\]])", r"\1", raw)
+                cfg = json.loads(raw)
+            except (ValueError, OSError):
+                continue
+            opts = cfg.get("compilerOptions") or {}
+            base = opts.get("baseUrl") or "."
+            found = []
+            for pattern, targets in (opts.get("paths") or {}).items():
+                for target in targets:
+                    found.append((pattern.rstrip("*"),
+                                  os.path.normpath(os.path.join(d, base, target.rstrip("*")))))
+            break
+        if found is not None:
+            _ALIASES[d] = found
+            return found
+        if not d:
+            _ALIASES[""] = []
+            return []
+        d = os.path.dirname(d)
+
+
+def _resolve_alias(from_rel, spec):
+    for prefix, target in _ts_aliases(from_rel):
+        if prefix and spec.startswith(prefix):
+            return os.path.normpath(os.path.join(target, spec[len(prefix):]))
+    return None
+
+
+def _pub_name():
+    """The Dart package name, so `package:app/x.dart` resolves to `lib/x.dart`. This is
+    the dominant import style in a Flutter app; without it a Flutter project parses fully
+    and produces zero edges, which is the false all-clear in its purest form."""
+    for base in (ROOT, os.path.join(ROOT, "lib", "..")):
+        pub = os.path.join(base, "pubspec.yaml")
+        if os.path.isfile(pub):
+            for line in open(pub, encoding="utf-8", errors="ignore"):
+                m = re.match(r"^name:\s*(\S+)", line)
+                if m:
+                    return m.group(1)
+    return None
+
+
+def _resolve_module(from_rel, spec, bare_relative=False):
+    """A relative specifier, or a Dart package specifier pointing back into this package,
+    resolved to a file on the tree. A third-party package resolves to nothing and is
+    dropped rather than guessed: an edge to a module we never read would be a stated fact
+    with nothing behind it."""
+    if spec.startswith("package:"):
+        pkg = _pub_name()
+        head = spec[len("package:"):].split("/", 1)
+        if not pkg or len(head) != 2 or head[0] != pkg:
+            return None
+        cand = os.path.join("lib", head[1])
+        return cand if os.path.isfile(os.path.join(ROOT, cand)) else None
+    if not spec.startswith("."):
+        aliased = _resolve_alias(from_rel, spec)
+        if aliased:
+            for cand in ([aliased] + [aliased + e for e in _RESOLVE_EXT]
+                         + [os.path.join(aliased, "index" + e) for e in _RESOLVE_EXT]):
+                if os.path.isfile(os.path.join(ROOT, cand)):
+                    return os.path.normpath(cand)
+            return None
+        # Dart writes a sibling import as `import 'logic.dart';` with no leading `./`.
+        # Requiring the dot parsed a Flutter app perfectly and returned zero edges.
+        # In JavaScript the same shape is a package in node_modules, so this is opt-in
+        # per language rather than a general fallback.
+        if not bare_relative or ":" in spec:
+            return None
+    base = os.path.normpath(os.path.join(os.path.dirname(from_rel), spec))
+    for cand in ([base] + [base + e for e in _RESOLVE_EXT]
+                 + [os.path.join(base, "index" + e) for e in _RESOLVE_EXT]):
+        if os.path.isfile(os.path.join(ROOT, cand)):
+            return os.path.normpath(cand)
+    return None
+
+
+def _count_idents(src):
+    """How many times each identifier appears. A declaration that never appears again in
+    its own file and has no importer is dead; one used locally is not, and conflating the
+    two is what makes a dead-code report unreadable."""
+    counts = {}
+    for m in _IDENT.finditer(src):
+        counts[m.group(0)] = counts.get(m.group(0), 0) + 1
+    return counts
+
+
+def _unbalanced(src):
+    """Which bracket does not close, once comments and strings are gone.
+
+    A regex parser cannot raise, so without this every malformed file counts as parsed and
+    the coverage line reports a confidence the tool has not earned. Balance is a weak test
+    and a real one: a file that does not balance is either broken or has defeated the
+    tokenizer, and both mean the declarations read out of it are not trustworthy."""
+    stack = []
+    for c in src:
+        if c in _OPEN:
+            stack.append(c)
+        elif c in _CLOSE:
+            if not stack or _OPEN.index(stack.pop()) != _CLOSE.index(c):
+                return "unbalanced '%s'" % c
+    return "unclosed '%s'" % stack[-1] if stack else None
+
+
+def _parse_js(rel, text):
+    src = _strip_literals(text, regex=True)
+    bad = _unbalanced(src)
+    if bad:
+        raise ValueError(bad)
+    spec_src = _strip_literals(text, keep_strings=True, regex=True)
+    decls = {m.group(1) for m in _JS_DECL.finditer(src)}
+    imports = []
+    for m in _JS_FROM.finditer(spec_src):
+        clause, spec = m.group(1), m.group(2)
+        target = _resolve_module(rel, spec)
+        if not target:
+            continue
+        named = _JS_NAMED.search(clause)
+        if named:
+            for part in named.group(1).split(","):
+                name = part.strip().split(" as ")[0].strip()
+                if name and name != "type":
+                    imports.append((target, name))
+        if _JS_STAR.search(clause) or not named:
+            imports.append((target, "*"))
+    for m in _JS_BARE.finditer(spec_src):
+        target = _resolve_module(rel, m.group(1))
+        if target:
+            imports.append((target, "*"))
+    return decls, imports, _count_idents(src)
+
+
+def _parse_dart(rel, text):
+    src = _strip_literals(text)
+    bad = _unbalanced(src)
+    if bad:
+        raise ValueError(bad)
+    spec_src = _strip_literals(text, keep_strings=True)
+    decls = {m.group(1) for m in _DART_TYPE.finditer(src)}
+    decls |= {m.group(1) for m in _DART_TOP.finditer(src)}
+    imports = []
+    for m in _DART_IMPORT.finditer(spec_src):
+        target = _resolve_module(rel, m.group(1), bare_relative=True)
+        if not target:
+            continue
+        shown = _DART_SHOW.search(m.group(2) or "")
+        if shown:
+            for name in shown.group(1).split(","):
+                if name.strip():
+                    imports.append((target, name.strip()))
+        else:
+            imports.append((target, "*"))
+    return decls, imports, _count_idents(src)
+
+
+def _resolve_py_absolute(rel, module):
+    """A dotted module name to a file, tried from the repo root and from the importing
+    file's own directory. Both are real: a package is imported from the root, and a script
+    run directly imports its neighbours by bare name."""
+    if not module:
+        return None
+    parts = module.replace(".", "/")
+    for base in ("", os.path.dirname(rel)):
+        for cand in (os.path.join(base, parts + ".py"),
+                     os.path.join(base, parts, "__init__.py")):
+            cand = os.path.normpath(cand)
+            if not cand.startswith("..") and os.path.isfile(os.path.join(ROOT, cand)):
+                return cand
+    return None
+
+
+_GD_DECL = re.compile(
+    r"(?:^|\n)\s*(?:@\w+(?:\([^)]*\))?\s+)*"
+    r"(?:static\s+)?(?:func|var|const|signal|enum|class)\s+([A-Za-z_]\w*)")
+_GD_CLASS_NAME = re.compile(r"(?:^|\n)\s*class_name\s+([A-Za-z_]\w*)")
+_GD_RES = re.compile(r"""(?:preload|load)\s*\(\s*["']res://([^"']+)["']\s*\)""")
+_GD_EXTENDS = re.compile(r"""(?:^|\n)\s*extends\s+(?:["']res://([^"']+)["']|([A-Za-z_]\w*))""")
+
+
+def _parse_gd(rel, text):
+    """GDScript. Comments are `#`, strings quote the same way Python's do, so the Python
+    side of the tokenizer applies.
+
+    Two things carry a dependency here and neither is an import statement: `preload` and
+    `load` naming a `res://` path, which is the real edge, and `class_name`, which puts a
+    symbol in a global registry that any other script can name with no import at all. The
+    second is why a GDScript graph can never be as complete as a TypeScript one, and the
+    coverage line has to keep saying so."""
+    src = _strip_literals(text, hashes=True)
+    spec_src = _strip_literals(text, hashes=True, keep_strings=True)
+    decls = {m.group(1) for m in _GD_DECL.finditer(src)}
+    decls |= {m.group(1) for m in _GD_CLASS_NAME.finditer(src)}
+    imports = []
+    for m in _GD_RES.finditer(spec_src):
+        target = os.path.normpath(m.group(1))
+        if os.path.isfile(os.path.join(ROOT, target)):
+            imports.append((target, "*"))
+    for m in _GD_EXTENDS.finditer(spec_src):
+        if m.group(1):
+            target = os.path.normpath(m.group(1))
+            if os.path.isfile(os.path.join(ROOT, target)):
+                imports.append((target, "*"))
+    return decls, imports, _count_idents(src)
+
+
+def _parse_py(rel, text):
+    """The one real grammar here, straight from the standard library."""
+    tree = ast.parse(text)
+    decls, imports, idents = set(), [], {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            decls.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    decls.add(t.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            decls.add(node.target.id)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            idents[node.id] = idents.get(node.id, 0) + 1
+        elif isinstance(node, ast.Attribute):
+            idents[node.attr] = idents.get(node.attr, 0) + 1
+        elif isinstance(node, ast.ImportFrom) and node.level:
+            # `from .x import y` means the sibling module x, so one leading dot is the
+            # current directory and each extra dot is one level up. Concatenating the
+            # dots instead produced `pkg/.x`, which resolves to nothing, so every Python
+            # project in ~/dev reported zero edges from the one real grammar here.
+            spec = "./" + "../" * (node.level - 1) + (node.module or "").replace(".", "/")
+            target = _resolve_module(rel, spec.rstrip("/"))
+            if target:
+                for a in node.names:
+                    imports.append((target, a.name))
+        elif isinstance(node, ast.ImportFrom):
+            # An absolute import can still name a module in this repo, either a top-level
+            # package or a sibling script run as a program rather than as a package.
+            target = _resolve_py_absolute(rel, node.module or "")
+            if target:
+                for a in node.names:
+                    imports.append((target, a.name))
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                target = _resolve_py_absolute(rel, a.name)
+                if target:
+                    imports.append((target, "*"))
+    return decls, imports, idents
+
+
+def parse_source(rel):
+    """(declarations, imports, identifiers), or None when this file has no grammar here.
+    Raises on a file the grammar should have handled and could not, so the caller records
+    which file failed instead of reporting a smaller graph as a complete one."""
+    ext = os.path.splitext(rel)[1]
+    with open(os.path.join(ROOT, rel), encoding="utf-8", errors="ignore") as fh:
+        text = fh.read()
+    if ext in _JS_EXT:
+        return _parse_js(rel, text)
+    if ext == ".dart":
+        return _parse_dart(rel, text)
+    if ext == ".py":
+        return _parse_py(rel, text)
+    if ext == ".gd":
+        return _parse_gd(rel, text)
+    return None
+
+
+_LITERAL = re.compile(r"""(?<![\w.])(\d{2,}(?:\.\d+)?)(?![\w.])|(['"])([^'"\n]{3,40})\2""")
+
+
+def value_echo(target, parsed):
+    """Files that carry the same literal value without importing the symbol.
+
+    An import edge is the only dependency this graph can state, and a dependency does not
+    have to be stated to be real. The one that started this design was a widget holding
+    its own copy of a ceiling: no import, no shared vocabulary, and it broke silently when
+    the ceiling moved. Full grammar coverage makes that worse rather than better, because
+    "47 of 47 parsed" reads as a complete answer.
+
+    So when the target is a constant, take the literals out of its definition and say
+    which other files repeat them. This is a suspicion, never an edge, and it is labelled
+    that way: a number can coincide."""
+    if "::" not in target:
+        return []
+    path, sym = target.split("::", 1)
+    if not os.path.isfile(os.path.join(ROOT, path)):
+        return []
+    with open(os.path.join(ROOT, path), encoding="utf-8", errors="ignore") as fh:
+        lines = fh.read().splitlines()
+    idx = [i for i, ln in enumerate(lines)
+           if re.search(r"\b%s\s*[:=]" % re.escape(sym), ln)]
+    if not idx:
+        return []
+    value = _whole_value(lines, idx[0], sym, path)
+    if value.startswith(("TOO LARGE", "STALE", "AMBIGUOUS")):
+        return []
+    lits = {m.group(1) or m.group(3) for m in _LITERAL.finditer(value)}
+    lits = {l for l in lits if l and l not in ("true", "false", "null")}
+    if not lits:
+        return []
+    echoes = []
+    for rel in parsed:
+        if rel == path:
+            continue
+        try:
+            with open(os.path.join(ROOT, rel), encoding="utf-8", errors="ignore") as fh:
+                body = _strip_literals(fh.read(), hashes=rel.endswith(".py"),
+                                       keep_strings=True)
+        except OSError:
+            continue
+        if sym in body:
+            continue  # it names the symbol, so the import edge already covers it
+        hit = sorted(l for l in lits if re.search(r"(?<![\w.])%s(?![\w.])"
+                                                  % re.escape(l), body))
+        if hit:
+            echoes.append((rel, hit))
+    return echoes
+
+
+def code_graph():
+    """Symbol nodes, and the files that import them. Only a stated import becomes an edge.
+    A name that merely appears in a file is not a dependency, and inventing that edge
+    would make the graph exactly as trustworthy as the grep it replaces."""
+    nodes, edges, parsed, failed = {}, [], [], []
+    scan = {}
+    for rel in candidate_sources():
+        try:
+            got = parse_source(rel)
+        except (SyntaxError, ValueError, OSError, RecursionError) as exc:
+            failed.append("%s: %s" % (rel, type(exc).__name__))
+            continue
+        if got is None:
+            continue
+        parsed.append(rel)
+        scan[rel] = got
+        nodes[rel] = {"kind": "file", "label": rel, "_uses": got[2]}
+    for rel in parsed:
+        for name in scan[rel][0]:
+            nodes.setdefault("%s::%s" % (rel, name),
+                             {"kind": "symbol", "label": "declared in " + rel})
+    for rel in parsed:
+        decls, imports, idents = scan[rel]
+        for target, name in imports:
+            if target == rel:
+                continue
+            if name == "*":
+                # A namespace or default import. The module is the dependency; which of
+                # its symbols is touched needs member resolution we do not have, so we
+                # state the module edge and add a symbol edge only where the declared
+                # name is actually present in this file.
+                for decl in (scan.get(target, (set(),))[0]):
+                    if idents.get(decl):
+                        edges.append((rel, "%s::%s" % (target, decl), "member"))
+                edges.append((rel, target, "imports"))
+            else:
+                edges.append((rel, "%s::%s" % (target, name), "imports"))
+    return nodes, edges, parsed, failed
+
+
+TREE_STAMP = os.path.join(MEM, ".tree")
+
+
+def _tree_now():
+    """Every source file with its size and mtime. One stat per file, no git."""
+    out = {}
+    for rel in candidate_sources():
+        try:
+            st = os.stat(os.path.join(ROOT, rel))
+        except OSError:
+            continue
+        out[rel] = "%d:%d" % (st.st_size, int(st.st_mtime))
+    return out
+
+
+def _tree_read():
+    try:
+        with open(TREE_STAMP, encoding="utf-8") as fh:
+            return dict(line.rstrip("\n").split("\t", 1)[::-1] for line in fh if "\t" in line)
+    except OSError:
+        return None
+
+
+def _tree_write(now):
+    os.makedirs(MEM, exist_ok=True)
+    with open(TREE_STAMP, "w", encoding="utf-8") as fh:
+        for rel, sig in sorted(now.items()):
+            fh.write("%s\t%s\n" % (sig, rel))
+
+
+def changed_files(advance=False):
+    """(changed, sources, blind) -- what changed, how we know, and what we cannot see.
+
+    Git is not always there. An agent that commits mid-task empties the diff, a project
+    may not be a repository at all, and either way `git diff` returns nothing, which reads
+    exactly like "nothing changed". So the primary signal is the file system: sizes and
+    mtimes against a stamp this tool keeps itself. Git is added when present, because it
+    reaches back further than the last turn.
+
+    `blind` is the part that matters. When neither source can answer, the caller must say
+    so rather than report an empty set as an all-clear.
+    """
+    now = _tree_now()
+    before = _tree_read()
+    changed, sources, blind = set(), [], []
+    if before is None:
+        blind.append("no file stamp yet, so nothing before this moment is visible")
+    else:
+        moved = {rel for rel, sig in now.items() if before.get(rel) != sig}
+        moved |= {rel for rel in before if rel not in now}
+        changed |= moved
+        sources.append("file stamp")
+    if _git("rev-parse", "--git-dir"):
+        changed |= {l[3:].strip() for l in git_dirty() if l[3:].strip()}
+        changed |= {l.strip() for l in _git("diff", "--name-only", "HEAD").splitlines()
+                    if l.strip()}
+        sources.append("git working tree")
+    else:
+        blind.append("not a git repository, so committed work is invisible")
+    if advance:
+        _tree_write(now)
+    return sorted(c for c in changed if c), sources, blind
+
+
+_GRAPH_CACHE = {}
+
+
+def build_graph():
+    """Nodes and edges that are stated, never inferred. Records cite ids, the truth file
+    carries refs, documents link each other. Anything requiring an AST is out of scope and
+    is reported as uncovered rather than silently returned as no edges.
+
+    Memoised for the life of one process. `check` asks for a claim's neighbourhood once
+    per TRUTH claim, and each ask re-parsed the whole source tree: one project reached 60
+    rebuilds and 47 seconds per prompt, past the hook timeout. Nothing inside a single run
+    writes a record, a doc or a source file, so the graph cannot change under it. Building
+    once also makes the claims agree with each other, which they did not while a subagent
+    was writing files through the run."""
+    if "graph" in _GRAPH_CACHE:
+        return _GRAPH_CACHE["graph"]
+
+    nodes, edges, uncovered = {}, [], []
+
+    for r in all_records():
+        rid = r.get("id")
+        if not rid:
+            continue
+        nodes[rid] = {"kind": "record", "label": r.get("title", "")[:70]}
+        body = (r.get("_body") or "") + " " + (r.get("title") or "")
+        for other in set(RECORD_RE.findall(body)) - {rid}:
+            edges.append((rid, other, "cites"))
+
+    if os.path.isdir(DOCS):
+        for fn in sorted(os.listdir(DOCS)):
+            if not fn.endswith(".md"):
+                continue
+            key = f"doc:{fn}"
+            nodes[key] = {"kind": "doc", "label": fn}
+            text = open(os.path.join(DOCS, fn), encoding="utf-8", errors="ignore").read()
+            for ref in parse_refs(text):
+                if ref.get("record"):
+                    edges.append((key, ref["record"], "refs"))
+                elif ref.get("file"):
+                    sym = f"{ref['file']}::{ref.get('symbol', '')}".rstrip(":")
+                    nodes.setdefault(sym, {"kind": "symbol", "label": sym})
+                    edges.append((key, sym, "refs"))
+            for rid in set(RECORD_RE.findall(text)):
+                edges.append((key, rid, "mentions"))
+            for link in re.findall(r"\]\(([^)]+\.md)\)", text):
+                edges.append((key, f"doc:{os.path.basename(link)}", "links"))
+
+    if not os.path.exists(TRUTH):
+        uncovered.append(f"{os.path.relpath(TRUTH, ROOT)} absent: no doc-to-symbol edges")
+
+    # Code edges merge into the same graph on purpose. A question like "what rests on this
+    # constant" has answers of both kinds -- a file that imports it and a decision that
+    # chose it -- and splitting them into two tools means every caller has to remember to
+    # ask twice, which is the same as not asking.
+    cnodes, cedges, parsed, failed = code_graph()
+    for k, v in cnodes.items():
+        nodes.setdefault(k, v)
+    edges.extend(cedges)
+    uncovered.extend(f"{f} (grammar failed)" for f in failed)
+    _GRAPH_CACHE["graph"] = (nodes, edges, uncovered, parsed, failed)
+    return _GRAPH_CACHE["graph"]
+
+
+# Extensions a code grammar is planned for, against those deliberately out of scope.
+# Measured across ~/dev on 2026-08-16: TypeScript and JavaScript are one parser family and
+# appear in ten projects including the two largest; Dart covers six; Python covers the
+# tooling. Swift is one real project and C# is one, so both are declared out of scope
+# rather than half-supported.
+PLANNED_EXT = {".ts", ".tsx", ".js", ".jsx", ".dart", ".py", ".gd"}
+OUT_OF_SCOPE_EXT = {".swift", ".cs", ".kt", ".java", ".rb", ".go", ".rs", ".php"}
+SKIP_DIRS = {"node_modules", "build", ".venv", "venv", "Pods", ".git", "dist", ".next",
+             "__pycache__", ".viber"}
+
+# Everything that is plainly not source. Anything outside this set and outside the two
+# lists above is a language this tool has never heard of, and it has to be counted rather
+# than skipped: a Godot project reported "61 of 61 source files parsed" while 51 GDScript
+# files, the actual game, appeared in no bucket at all. A denominator built from what the
+# tool recognises is not a denominator, it is a mirror.
+NOT_SOURCE_EXT = {
+    ".md", ".markdown", ".txt", ".rst", ".json", ".jsonc", ".yaml", ".yml", ".toml",
+    ".ini", ".cfg", ".conf", ".env", ".lock", ".xml", ".csv", ".tsv", ".sql",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp", ".tga", ".psd",
+    ".mp3", ".wav", ".ogg", ".mp4", ".mov", ".webm", ".ttf", ".otf", ".woff", ".woff2",
+    ".pdf", ".zip", ".gz", ".tar", ".bin", ".dat", ".db", ".sqlite", ".map",
+    ".html", ".htm", ".css", ".scss", ".sass", ".less", ".gitkeep", ".gitignore",
+    ".import", ".uid", ".ctex", ".res", ".pck", ".apk", ".ipa", ".keystore",
+}
+
+
+_IGNORED_DIRS = None
+
+
+def _git_ignored_dirs():
+    """Directories git already ignores.
+
+    Better than a hand-kept skip list, and better than guessing at extensions: the project
+    has already declared what is not its source, and this reads that declaration instead
+    of curating a second opinion. Without it, a scratch directory full of scan output made
+    a coverage line read 61 of 730 when the honest answer was 61 of 128."""
+    global _IGNORED_DIRS
+    if _IGNORED_DIRS is not None:
+        return _IGNORED_DIRS
+    _IGNORED_DIRS = set()
+    out = _git("ls-files", "--others", "--ignored", "--exclude-standard", "--directory")
+    for line in out.splitlines():
+        line = line.strip().rstrip("/")
+        if line and os.path.isdir(os.path.join(ROOT, line)):
+            _IGNORED_DIRS.add(os.path.normpath(line))
+    return _IGNORED_DIRS
+
+
+def _walk_source():
+    """Every file the project maintains, with ignored and skipped trees pruned."""
+    ignored = _git_ignored_dirs()
+    for base, dirs, files in os.walk(ROOT):
+        rel_base = os.path.relpath(base, ROOT)
+        rel_base = "" if rel_base == "." else rel_base
+        dirs[:] = [d for d in dirs
+                   if d not in SKIP_DIRS and not d.startswith(".")
+                   and os.path.normpath(os.path.join(rel_base, d)) not in ignored]
+        for f in files:
+            yield rel_base, f
+
+
+def unknown_language_sources():
+    """Files in a language neither parsed nor declared out of scope, by extension.
+
+    These are the files a coverage line must not omit. Reporting a percentage of the
+    files the tool happens to recognise, while a whole language sits outside the count,
+    is the false all-clear this tool exists to prevent, produced by the tool itself."""
+    found = {}
+    for _rel_base, f in _walk_source():
+        if True:
+            ext = os.path.splitext(f)[1].lower()
+            if not ext or ext in PLANNED_EXT or ext in OUT_OF_SCOPE_EXT:
+                continue
+            if ext in NOT_SOURCE_EXT:
+                continue
+            found[ext] = found.get(ext, 0) + 1
+    return found
+
+
+def candidate_sources():
+    """Every file a grammar here claims to read."""
+    found = []
+    for rel_base, f in _walk_source():
+        if os.path.splitext(f)[1] in PLANNED_EXT:
+            found.append(os.path.join(rel_base, f) if rel_base else f)
+    return sorted(found)
+
+
+def out_of_scope_sources():
+    """Files in a language deliberately not supported. Counted and named, because a
+    language nobody parses is a hole the caller has to know the size of."""
+    found = []
+    for rel_base, f in _walk_source():
+        if os.path.splitext(f)[1] in OUT_OF_SCOPE_EXT:
+            found.append(os.path.join(rel_base, f) if rel_base else f)
+    return sorted(found)
+
+
+def source_files(parsed=None, failed=None):
+    """Every source file, classified per file rather than per language. A grammar that
+    exists and fails on one file is the dangerous case, and a per-language summary is
+    exactly what hides it."""
+    parsed = list(parsed or [])
+    failed = list(failed or [])
+    # A file whose grammar raised is not a file with no grammar. Counting it in both
+    # buckets made the totals disagree with the file count, and a coverage line that does
+    # not add up is not evidence of anything.
+    seen = set(parsed) | {f.split(":")[0] for f in failed}
+    unparsed = [r for r in candidate_sources() if r not in seen]
+    return parsed, unparsed, out_of_scope_sources(), failed
+
+
+def blind_scan(term, files):
+    """A plain string search over the files the graph cannot parse.
+
+    This does not find callers and does not pretend to. It converts 'there may be
+    something I cannot see' into 'here are the files I could not read that mention this
+    name', which is the difference between an unknown unknown and a known one. Reporting
+    nothing at all would leave the caller believing the edge list was complete."""
+    hits = []
+    for rel in files:
+        try:
+            with open(os.path.join(ROOT, rel), encoding="utf-8", errors="ignore") as fh:
+                if term in fh.read():
+                    hits.append(rel)
+        except OSError:
+            continue
+    return hits, len(files)
+
+
+def cmd_graph(args):
+    sub = args[0] if args else "build"
+    nodes, edges, uncovered, parsed, failed = build_graph()
+
+    def coverage(term=None):
+        """Never print an edge list without this. An empty answer that means "nothing
+        depends on it" and an empty answer that means "I read none of the files" look
+        identical, and only one of them is safe to act on."""
+        got, unparsed, out, bad = source_files(parsed, failed)
+        unknown = unknown_language_sources()
+        n_unknown = sum(unknown.values())
+        total = len(got) + len(unparsed) + len(out) + len(bad) + n_unknown
+        print(f"  COVERAGE: {len(got)} of {total} source file(s) parsed "
+              f"({len(unparsed)} no grammar, {len(out)} out of scope"
+              + (f", {len(failed)} failed" if failed else "")
+              + (f", {n_unknown} in a language this tool does not know" if unknown else "")
+              + ")")
+        if unknown:
+            listed = ", ".join(f"{ext} x{n}" for ext, n
+                               in sorted(unknown.items(), key=lambda kv: -kv[1])[:6])
+            print(f"  UNEXAMINED: {listed}. Nothing below is a statement about these.")
+        for u in uncovered:
+            print(f"  NOT COVERED: {u}")
+        if term:
+            dark = unparsed + out
+            hits, seen = blind_scan(term, dark)
+            if not dark:
+                return
+            if hits:
+                print(f"  BLIND SCAN: '{term}' appears as text in {len(hits)} of the "
+                      f"{seen} unparsed file(s). Not callers, but not nothing:")
+                for h in hits[:12]:
+                    print(f"    ? {h}")
+            else:
+                print(f"  BLIND SCAN: '{term}' appears in none of the {seen} unparsed files")
+
+    def limits(target):
+        """Printed with every answer, including a complete one. What this graph states is
+        stated imports. A file holding its own copy of a value depends on it just as
+        hard, is invisible here, and breaks in silence when the value moves."""
+        echoes = value_echo(target, parsed)
+        if echoes:
+            print(f"  VALUE ECHO: {len(echoes)} parsed file(s) repeat a literal from this "
+                  f"definition without naming it. Coincidence is possible; silent "
+                  f"coupling is likelier:")
+            for rel, lits in echoes[:8]:
+                print(f"    ~ {rel}  ({', '.join(lits[:4])})")
+            if len(echoes) > 8:
+                print(f"    ... and {len(echoes) - 8} more. A literal this common is "
+                      f"probably a coincidence; a literal in two files is probably not.")
+        print("  STATES: imports only. A duplicated literal, a string-keyed lookup or a "
+              "value crossing a runtime boundary is a real dependency and is not an edge "
+              "here, at any coverage.")
+        if any(f.endswith(".gd") for f in parsed):
+            print("  GDSCRIPT: `class_name` registers a symbol globally, so one script can "
+                  "name another with no preload and no line to read it from. Those uses "
+                  "are real and are not edges here.")
+
+    if sub == "build":
+        kinds = {}
+        for n in nodes.values():
+            kinds[n["kind"]] = kinds.get(n["kind"], 0) + 1
+        print(f"{len(nodes)} node(s): " + ", ".join(f"{v} {k}" for k, v in sorted(kinds.items())))
+        print(f"{len(edges)} edge(s)")
+        coverage()
+        return 0
+
+    if sub == "deps":
+        if len(args) < 2:
+            die("usage: viber graph deps <R-042|doc:NAME.md|path::SYMBOL>")
+        target = args[1]
+        if "::" not in target and not target.startswith(("R-", "doc:")) \
+                and target not in nodes:
+            # A path with no symbol: answer for every symbol the file declares, since
+            # "who depends on this file" is the question actually being asked.
+            kids = sorted(k for k in nodes if k.startswith(target + "::"))
+            if kids:
+                print(f"{target} declares {len(kids)} symbol(s):")
+                for k in kids:
+                    users = sorted({a for a, b, _ in edges if b == k})
+                    print(f"  {k.split('::')[-1]}  <- {len(users)} file(s)"
+                          + ("".join(f"\n      {u}" for u in users) if users else ""))
+                coverage(os.path.basename(target))
+                return 0
+        out = [(a, k) for a, b, k in edges if b == target]
+        into = [(b, k) for a, b, k in edges if a == target]
+        if target not in nodes and not out and not into:
+            print(f"'{target}' is not a node in this graph.")
+            coverage(target.split("::")[-1])
+            return 1
+        print(f"{target}  {nodes.get(target, {}).get('label', '')}")
+        print(f"  depends on ({len(into)}):")
+        for b, k in sorted(set(into)):
+            print(f"    {k:9} {b}  {nodes.get(b, {}).get('label', '')[:60]}")
+        print(f"  depended on by ({len(out)}):")
+        for a, k in sorted(set(out)):
+            print(f"    {k:9} {a}  {nodes.get(a, {}).get('label', '')[:60]}")
+        coverage(target.split("::")[-1])
+        limits(target)
+        return 0
+
+    if sub == "orphans":
+        referenced = {b for _, b, _ in edges}
+        loose = [k for k, v in nodes.items() if v["kind"] == "record" and k not in referenced]
+        print(f"{len(loose)} record(s) nothing references:")
+        for k in sorted(loose)[:40]:
+            print(f"  {k}  {nodes[k]['label'][:70]}")
+        # Dead code is observable; "speculative" is not, which is why this is a command
+        # and the YAGNI rule stays prose. An entry point and a test have no importer by
+        # design, so neither is dead and neither is listed.
+        entry = ("main", "index", "app", "conftest", "setup", "__init__")
+        # A framework calls these by convention, not by import. Listing them buries the
+        # symbols that are genuinely unreached under a hundred that are working exactly
+        # as designed, and a report that is mostly noise stops being read.
+        framework = ("page", "layout", "route", "template", "error", "loading",
+                     "not-found", "opengraph-image", "sitemap", "robots", "middleware",
+                     "default", "global-error", "icon", "apple-icon", "manifest")
+        dead = []
+        for k, v in nodes.items():
+            if v["kind"] != "symbol" or k in referenced:
+                continue
+            f, name = k.split("::", 1)
+            stem = os.path.splitext(os.path.basename(f))[0]
+            if stem in entry or "test" in f.lower() or "spec" in stem:
+                continue
+            if stem in framework and (f.startswith("app/") or f.startswith("src/app/")
+                                      or f.startswith("pages/")):
+                continue
+            if name.startswith("_"):
+                continue          # private by convention, so it was never an export
+            if nodes.get(f, {}).get("_uses", {}).get(name, 0) > 1:
+                continue          # used inside its own file, so it is not dead
+            dead.append(k)
+        print(f"\n{len(dead)} exported symbol(s) nothing in this tree imports. Each is a "
+              f"candidate, not a verdict:")
+        for k in sorted(dead)[:30]:
+            print(f"  {k}")
+        if len(dead) > 30:
+            print(f"  ... and {len(dead) - 30} more")
+        coverage()
+        print("  Not proof of dead code: a symbol reached by a framework, a route table "
+              "or a string lookup has no import edge and is still live.")
+        return 0
+
+    die("usage: viber graph [build|deps <id>|orphans]")
+
+
+COMMANDS = {"new": cmd_new, "set": cmd_set, "list": cmd_list, "show": cmd_show,
+            "fact": cmd_fact,
+            "state": cmd_state, "index": cmd_index, "check": cmd_check, "init": cmd_init,
+            "doctor": cmd_doctor,
+            "trigger": cmd_trigger, "lessons": cmd_lessons, "finding": cmd_finding,
+            "truth": cmd_truth, "graph": cmd_graph}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    cmd = sys.argv[1]
+    if cmd not in COMMANDS:
+        die(f"unknown command '{cmd}'. Try: {', '.join(COMMANDS)}")
+    return COMMANDS[cmd](sys.argv[2:]) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

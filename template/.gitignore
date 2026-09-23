@@ -1,0 +1,32 @@
+# os
+.DS_Store
+Thumbs.db
+
+# secrets
+.env
+.env.*
+*.pem
+credentials.json
+token.json
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# node
+node_modules/
+dist/
+build/
+.next/
+
+# logs
+*.log
+.viber/hook.log
+
+# machine local, not shared
+.viber/memory/.last-env-check
+.viber/memory/.tree
+
+.viber/memory/.ids/
