@@ -42,7 +42,7 @@ Agents are pinned to a model alias in their definition. Aliases track the latest
 
 | The work is | Agent | Model |
 |---|---|---|
-| Analysis, research, design, or writing a document or spec | `analyst` | `fable` |
+| Analysis, research, design, or writing a document or spec | `analyst` | `opus` |
 | Implementation that is large, cross-file, or a complex or risky refactor | `builder` | `opus` |
 | Implementation that is small and contained, with no decision left | `coder` | `sonnet` |
 | Mechanical bulk work: renames, extraction, reformatting across many files | `grunt` | `haiku` |
@@ -64,7 +64,6 @@ Two tie-breaks decide the close calls, and both err toward safety over thrift:
 The one costly misroute is under-sizing: sending hard or decision-laden work to a cheap agent that guesses. The tie-breaks exist to make that error the hard one to commit.
 
 - **`reviewer` is never routed by the four questions.** The review gate in section 8 calls it, after the implementer's handoff and before the commit.
-- **If `fable` is unavailable, fall back to `opus` and say so** in the summary. Never fail silently.
 - **Always name an agent; never spawn a bare one.** An unnamed subagent inherits your model and its full price on the cheapest work.
 
 ## 4. Memory: records
