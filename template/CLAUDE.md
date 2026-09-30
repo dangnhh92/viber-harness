@@ -43,8 +43,8 @@ Agents are pinned to a model alias in their definition. Aliases track the latest
 | The work is | Agent | Model |
 |---|---|---|
 | Analysis, research, design, or writing a document or spec | `analyst` | `opus` |
-| Implementation that is large, cross-file, or a complex or risky refactor | `builder` | `opus` |
-| Implementation that is small and contained, with no decision left | `coder` | `sonnet` |
+| Implementation that still needs a design decision, or a complex or risky refactor | `builder` | `opus` |
+| Implementation whose approach is already decided and can be stated in the brief, small or not | `coder` | `sonnet` |
 | Mechanical bulk work: renames, extraction, reformatting across many files | `grunt` | `haiku` |
 | Reading a finished change for defects before it is committed | `reviewer` | `sonnet` |
 | Trivial, or a conversation | you | the session default |
@@ -53,15 +53,15 @@ Route by asking these in order and taking the first that fits. The order matters
 
 1. **Is the deliverable not code** but an answer, a decision, a design, or a document? Then `analyst`. Judge the OUTPUT, not the words: "build me a comparison of two libraries" is analysis, not a build.
 2. **Is it one fully-determined rule repeated across more than one file**, with no decision along the way (a rename, a reformat, an identical edit everywhere)? Then `grunt`. A determined rename across a few files is grunt however few they are; a single small edit is not worth a subagent. If any step needs a judgment, it is not mechanical, so it is not grunt.
-3. **Does it need a design decision, span many files, or is it a complex or risky refactor?** Any one is enough. Then `builder`.
-4. **Otherwise** it is contained, decided, and small. Then `coder`.
+3. **Does it still need a design decision, or is it a complex or risky refactor** whose blast radius you cannot state up front? Either is enough. Then `builder`.
+4. **Otherwise** you can write the approach, the anchor, the files and the criteria into the brief with no decision left for the agent. Then `coder`, however many files it touches.
 
-Two tie-breaks decide the close calls, and both err toward safety over thrift:
+Two tie-breaks decide the close calls:
 
-- **Between `builder` and `coder`, pick `builder`.** The cost of `coder` failing a hard task is a wrong build; the cost of `builder` on a medium task is some tokens. Size up, not down.
+- **Between `builder` and `coder`, ask whether your brief says what to do or asks the agent to figure out how.** If it says what to do, pick `coder`: the review gate (section 8) catches what it misses, at a fraction of the price. If the brief has to say "find the cause" or "choose an approach", pick `builder`.
 - **Between `grunt` and `coder`, pick `coder`.** `grunt` accepts only fully-determined work; the moment there is a decision hiding in it, `grunt` will guess and you get a mess. If you are not certain it is decision-free, it is not `grunt`.
 
-The one costly misroute is under-sizing: sending hard or decision-laden work to a cheap agent that guesses. The tie-breaks exist to make that error the hard one to commit.
+The costly misroute is sending decision-laden work to an agent that guesses; the other waste is paying `builder` to follow a brief that already decided everything. A precise brief is what makes `coder` safe, so write the brief before choosing.
 
 - **`reviewer` is never routed by the four questions.** The review gate in section 8 calls it, after the implementer's handoff and before the commit.
 - **Always name an agent; never spawn a bare one.** An unnamed subagent inherits your model and its full price on the cheapest work.
