@@ -47,6 +47,7 @@ Agents are pinned to a model alias in their definition. Aliases track the latest
 | Implementation whose approach is already decided and can be stated in the brief, small or not | `coder` | `sonnet` |
 | Mechanical bulk work: renames, extraction, reformatting across many files | `grunt` | `haiku` |
 | Reading a finished change for defects before it is committed | `reviewer` | `sonnet` |
+| Executing a written test or capture plan: simulators, suites, screenshots | `runner` | `haiku` |
 | Trivial, or a conversation | you | the session default |
 
 Route by asking these in order and taking the first that fits. The order matters: it puts the most distinctive signal first, and it ends on the safe default.
@@ -64,6 +65,7 @@ Two tie-breaks decide the close calls:
 The costly misroute is sending decision-laden work to an agent that guesses; the other waste is paying `builder` to follow a brief that already decided everything. A precise brief is what makes `coder` safe, so write the brief before choosing.
 
 - **`reviewer` is never routed by the four questions.** The review gate in section 8 calls it, after the implementer's handoff and before the commit.
+- **`runner` is never routed by the four questions either.** Whoever wrote a test or capture plan hands it to `runner` to execute instead of spending its own context on the run. `runner` returns artifacts and mechanical checks, never a verdict: the caller looks at every screenshot and output itself before calling anything tested.
 - **Always name an agent; never spawn a bare one.** An unnamed subagent inherits your model and its full price on the cheapest work.
 
 ## 4. Memory: records

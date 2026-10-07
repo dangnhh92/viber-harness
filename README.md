@@ -45,7 +45,7 @@ Everything lives in `template/` and copies into your project as is.
 | Part | Path | What it is |
 |---|---|---|
 | Rules | `CLAUDE.md` | The orchestrator's contract: roles, the work loop, routing table, memory rules, review gate, git rules. `AGENTS.md` points at it so other tools read the same file. |
-| Agents | `.claude/agents/*.md` | Five definitions, each pinned to a model: `analyst` (opus), `builder` (opus), `coder` (sonnet), `grunt` (haiku), `reviewer` (sonnet). |
+| Agents | `.claude/agents/*.md` | Six definitions, each pinned to a model: `analyst` (opus), `builder` (opus), `coder` (sonnet), `grunt` (haiku), `reviewer` (sonnet), `runner` (haiku, executes a written test or capture plan and returns artifacts, never a verdict). |
 | Hooks | `.claude/settings.json` | `SessionStart` regenerates memory into context; `UserPromptSubmit` does that again and lists what is hanging, so every prompt starts current. |
 | CLI | `.viber/bin/viber` | One Python file the orchestrator runs: records, facts, lessons, findings, signals, truth check, code graph, health report. |
 | Memory | `.viber/memory/records/` | One file per record: `decision`, `task`, `issue`, `lesson`, `milestone`, `question`, `fact`. `state.md` and `index.md` are generated from them. |

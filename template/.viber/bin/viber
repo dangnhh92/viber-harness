@@ -1239,7 +1239,7 @@ def _newest(dirpath):
     return newest
 
 
-AGENT_ROLES = ["analyst", "builder", "coder", "grunt", "reviewer"]
+AGENT_ROLES = ["analyst", "builder", "coder", "grunt", "reviewer", "runner"]
 SECRET_HINT = re.compile(r"(sk-[A-Za-z0-9]{16,}|gsk_[A-Za-z0-9]{16,}|figd_[A-Za-z0-9_-]{16,}"
                          r"|AIza[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)")
 
