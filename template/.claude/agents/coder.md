@@ -94,6 +94,7 @@ HANDOFF:
   files:      what you touched
   checks:     what you ran and what it printed
   unresolved: anything the spec did not answer
+  open:       every known defect, unfinished piece or deferred step touching this work (including ones only noted in code or records), each with status: being fixed | blocked by what | waiting until when | depends on which task. 'none' if none
   selfscan:   1 clean | 2 clean (deps parsed 9/9, 2 callers updated) | 3 clean | 4 fixed: <what> | 5 clean (<test command>: <result>)
 ```
 

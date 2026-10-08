@@ -65,6 +65,7 @@ HANDOFF:
   criteria:   each acceptance criterion -> met (how you checked) | not met | could not verify (why)
   weakest:    the two or three places you are least sure of, so they get reviewed first
   unresolved: anything the ask did not answer, and anything you invented
+  open:       every known defect, unfinished piece or deferred step touching this work (including ones only noted in code or records), each with status: being fixed | blocked by what | waiting until when | depends on which task. 'none' if none
 ```
 
 Every claim carries how you know it. State a confidence when it is not certain: confirmed, estimated, or assumed.

@@ -46,6 +46,7 @@ HANDOFF:
   applied:    how many files changed, and a grep showing no occurrences of the old form remain
   skipped:    each file that did not match the pattern, with the reason
   unresolved: anything ambiguous you refused to guess
+  open:       every known defect, unfinished piece or deferred step touching this work (including ones only noted in code or records), each with status: being fixed | blocked by what | waiting until when | depends on which task. 'none' if none
 ```
 
 ## Memory
