@@ -65,7 +65,7 @@ Two tie-breaks decide the close calls:
 The costly misroute is sending decision-laden work to an agent that guesses; the other waste is paying `builder` to follow a brief that already decided everything. A precise brief is what makes `coder` safe, so write the brief before choosing.
 
 - **`reviewer` is never routed by the four questions.** The review gate in section 8 calls it, after the implementer's handoff and before the commit.
-- **`runner` is never routed by the four questions either.** Whoever wrote a test or capture plan hands it to `runner` to execute instead of spending its own context on the run. `runner` returns artifacts and mechanical checks, never a verdict: the caller looks at every screenshot and output itself before calling anything tested.
+- **`runner` is never routed by the four questions either.** Any test or capture run longer than a couple of commands (booting a simulator or emulator, driving the app, sending test pushes, taking screenshots, a long suite) goes to `runner`: write the plan, hand it over, and do not run it yourself, even when it feels quicker. `runner` returns artifacts and mechanical checks, never a verdict: the caller looks at every screenshot and output itself before calling anything tested.
 - **Always name an agent; never spawn a bare one.** An unnamed subagent inherits your model and its full price on the cheapest work.
 
 ## 4. Memory: records
