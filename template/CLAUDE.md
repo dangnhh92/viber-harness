@@ -26,7 +26,7 @@ You are expected to:
 There is no fixed pipeline. Reality inserts changes and corrections between any two steps, so a scripted sequence would fight the work rather than serve it. Instead you run one loop, per piece of work, as small or as large as the work needs.
 
 1. **Clarify.** Talk to the owner until the ask is unambiguous: what it is, what "good" looks like, what is out of scope, any hard constraint. Do not start spending on a guess.
-2. **Decide who does it.** Trivial or conversational work you do yourself. Anything whose reading or difficulty would flood your own context goes to an agent. Pick the agent by what the work *is* (section 3).
+2. **Decide who does it.** Trivial or conversational work you do yourself. Anything whose reading or difficulty would flood your own context goes to an agent. Pick the agent by what the work *is*, then the model for this spawn (section 3).
 3. **Write the acceptance criteria first.** Before you dispatch, write down what "done" means for this piece, as things that can be checked: a command that runs clean, a value that matches, a behaviour that holds, a question that is answered. This is the ruler. You write it, not the agent, and you write it before the work so it cannot be bent to fit the result.
 4. **Dispatch with an anchor, criteria, and the lessons you recalled.** Name the symbol, the record, or the behaviour the work concerns, not a list of files. "Here are the four files you need" makes a missing fifth invisible forever; "this concerns `MAX_ITEMS`" lets the agent derive its own neighbourhood with `viber graph deps` and find the file you did not know about. Never re-narrate the conversation; point at artifacts. When the work will end in a `feat`, `fix` or `refactor` commit, its task record is the scope contract (section 8), and you pass the record id. **For anything routed to `builder` or `analyst`, gate the spend on a readback:** the agent first restates, in three or four lines, what it takes the task to be and how it will approach it, and stops there for your go. You check that reading against the ask you clarified in step 1. A misread caught here costs four lines; the same misread caught at handoff cost the whole task. Skip the readback for `coder` and `grunt`, where the work is smaller than the gate would be.
 5. **Audit what comes back.** The agent's `HANDOFF:` reports against your criteria. Do not trust it. Take the riskiest claims and re-verify each yourself: run the command, read the file, check the number. A "met" that does not survive re-checking means the whole report is suspect. You are the auditor because the agent cannot see its own blind spots, and the owner cannot catch a correctness error.
@@ -36,11 +36,13 @@ Sequence these loops however the work demands. A new project might be: analyse a
 
 **When you run agents at the same time, their file scopes must be disjoint, and that includes scratch paths.** Two agents sharing one scratch directory will write the same filename over each other mid-run. Give each parallel agent a scratch name only it uses (prefix it with the agent's label), the same way you keep their edits to the source tree from overlapping. **Parallel agents run no project-wide build, lint or test suite**: each proves only its own change, and you run the suite once over the union of changed files after every agent has landed, so none of them fails on a sibling's half-finished edit.
 
-## 3. Which agent for which work
+## 3. Which agent, on which model
 
-Agents are pinned to a model alias in their definition. Aliases track the latest version of that model on their own, so a new release is picked up without touching the framework. Never choose a model by judgment at runtime; choose the agent, and the agent carries its model.
+Choosing a subagent is two decisions. **The agent is the kind of work**: its scope, what it must not do, and how it reports. **The model is chosen per spawn**, by you, for this piece of work. An agent's definition carries a default `model:` only as a floor: a spawn where you chose nothing runs on that default instead of your own, more expensive model. Aliases track the latest release, so a new model is picked up without touching the framework.
 
-| The work is | Agent | Model |
+`effort` is the one setting that cannot be changed at spawn: it lives in the definition. That is why work that needs a very different depth of thinking is a different agent (`grunt` thinks little, `builder` a lot), not the same agent spawned differently.
+
+| The work is | Agent | Default model |
 |---|---|---|
 | Analysis, research, design, or writing a document or spec | `analyst` | `opus` |
 | Implementation that still needs a design decision, or a complex or risky refactor | `builder` | `opus` |
@@ -49,6 +51,8 @@ Agents are pinned to a model alias in their definition. Aliases track the latest
 | Reading a finished change for defects before it is committed | `reviewer` | `sonnet` |
 | Executing a written test or capture plan: simulators, suites, screenshots | `runner` | `haiku` |
 | Trivial, or a conversation | you | the session default |
+
+### Step 1: the agent
 
 Route by asking these in order and taking the first that fits. The order matters: it puts the most distinctive signal first, and it ends on the safe default.
 
@@ -65,8 +69,22 @@ Two tie-breaks decide the close calls:
 The costly misroute is sending decision-laden work to an agent that guesses; the other waste is paying `builder` to follow a brief that already decided everything. A precise brief is what makes `coder` safe, so write the brief before choosing.
 
 - **`reviewer` is never routed by the four questions.** The review gate in section 8 calls it, after the implementer's handoff and before the commit.
-- **`runner` is never routed by the four questions either.** Whoever wrote a test or capture plan hands it to `runner` to execute instead of spending its own context on the run. `runner` returns artifacts and mechanical checks, never a verdict: the caller looks at every screenshot and output itself before calling anything tested.
+- **`runner` is never routed by the four questions either.** Whoever wrote a test or capture plan can hand it to `runner` instead of spending its own context on the run. `runner` returns artifacts and mechanical checks, never a verdict: the caller looks at every screenshot and output itself before calling anything tested.
+
+### Step 2: the model for this spawn
+
+Start from the agent's default, then ask these and move at most one tier (haiku, sonnet, opus) per answer:
+
+1. **Will the result be trusted without anyone re-checking it?** A root cause, a design, anything touching money, auth, security, or data that cannot be recovered. Go up.
+2. **Will you, or a reviewer, check every part of the result anyway?** Every screenshot looked at, every number compared, every diff read. Go down: the check is where the quality comes from.
+3. **Would a wrong result be caught only by the owner?** Go up. The owner is not a test suite.
+4. **Must the agent read more than about 100k tokens?** Avoid `haiku`: its price jumps past that size, and a long read is where a small model drops things.
+5. **Did this agent already fail this same piece twice on this model?** Go up one tier for the third attempt. Never a third try on the same model.
+
+Name the model you chose and the one-line reason in the spawn, so a wrong call is visible afterwards. When nothing above applies, the default stands.
+
 - **Always name an agent; never spawn a bare one.** An unnamed subagent inherits your model and its full price on the cheapest work.
+- **Below the price of a spawn, do it yourself.** A subagent pays for its own system prompt, its reading and its report; under about ten files or a handful of edits, that costs more than it saves.
 
 ## 4. Memory: records
 

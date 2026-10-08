@@ -45,7 +45,7 @@ Everything lives in `template/` and copies into your project as is.
 | Part | Path | What it is |
 |---|---|---|
 | Rules | `CLAUDE.md` | The orchestrator's contract: roles, the work loop, routing table, memory rules, review gate, git rules. `AGENTS.md` points at it so other tools read the same file. |
-| Agents | `.claude/agents/*.md` | Six definitions, each pinned to a model: `analyst` (opus), `builder` (opus), `coder` (sonnet), `grunt` (haiku), `reviewer` (sonnet), `runner` (haiku, executes a written test or capture plan and returns artifacts, never a verdict). |
+| Agents | `.claude/agents/*.md` | Six definitions, one per kind of work, each with a default model: `analyst` (opus), `builder` (opus), `coder` (sonnet), `grunt` (haiku), `reviewer` (sonnet), `runner` (haiku, executes a written test or capture plan and returns artifacts, never a verdict). |
 | Hooks | `.claude/settings.json` | `SessionStart` regenerates memory into context; `UserPromptSubmit` does that again and lists what is hanging, so every prompt starts current. |
 | CLI | `.viber/bin/viber` | One Python file the orchestrator runs: records, facts, lessons, findings, signals, truth check, code graph, health report. |
 | Memory | `.viber/memory/records/` | One file per record: `decision`, `task`, `issue`, `lesson`, `milestone`, `question`, `fact`. `state.md` and `index.md` are generated from them. |
@@ -56,7 +56,7 @@ Everything lives in `template/` and copies into your project as is.
 | Pain | Mechanism |
 |---|---|
 | The agent says "done" and it is not | Acceptance criteria are written before dispatch, by the orchestrator, not the agent. The agent reports against them in a `HANDOFF:` block; the orchestrator re-runs the riskiest claims itself before accepting. |
-| Hard work goes to a cheap model, trivial work to an expensive one | Four routing questions pick the agent; the agent definition pins the model. Ties size up (`builder` over `coder`) and away from guessing (`coder` over `grunt`). A definition with no model line is reported as a framework fault every prompt. |
+| Hard work goes to a cheap model, trivial work to an expensive one | Four routing questions pick the agent (the kind of work); five more pick the model for each spawn, starting from the agent's default and moving at most one tier per answer. Ties size up (`builder` over `coder`) and away from guessing (`coder` over `grunt`). A definition with no model line is reported as a framework fault every prompt. |
 | Context is lost between sessions | Decisions, tasks, lessons and issues are records on disk. The session-start hook regenerates them into the first prompt. |
 | Numbers in memory go stale | A fact is stored as a location (`file` + `symbol`), never as a value; state resolves it from source on every regen. |
 | Docs drift from code | Every claim in `TRUTH.md` anchors to a symbol or a record. The check reports a symbol that is gone, a line with no anchor, and a claim whose code moved since anyone last read it. A diff surfaces the claims it touches. |
