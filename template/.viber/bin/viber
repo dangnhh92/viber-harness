@@ -1644,7 +1644,7 @@ def _claim_neighbourhood(claim):
     for ref in claim["refs"]:
         if ref.get("file") and ref.get("symbol"):
             target = "%s::%s" % (ref["file"], ref["symbol"])
-            for rel, _lits in value_echo(target, parsed):
+            for rel, _lits in value_echo(target, parsed)[0]:
                 files.add(rel)
     return {f for f in files if os.path.isfile(os.path.join(ROOT, f))}
 
@@ -2285,6 +2285,13 @@ def parse_source(rel):
     return None
 
 
+# Proposed values, not ratified. Measured on the portfolio tree (59 parsed files, 16
+# claims): echo files per claim summed 64 before, 1 after; neighbourhood files summed
+# 213 before, 180 after. The template tree has no claims, so it measures 0 both times.
+ECHO_MIN_WORD = 5
+ECHO_MAX_FILES = 3
+ECHO_MAX_SHARE = 0.10
+
 _LITERAL = re.compile(r"""(?<![\w.])(\d{2,}(?:\.\d+)?)(?![\w.])|(['"])([^'"\n]{3,40})\2""")
 
 
@@ -2299,26 +2306,31 @@ def value_echo(target, parsed):
 
     So when the target is a constant, take the literals out of its definition and say
     which other files repeat them. This is a suspicion, never an edge, and it is labelled
-    that way: a number can coincide."""
+    that way: a number can coincide.
+
+    Returns the echoes and the literals left out because too many files carry them."""
     if "::" not in target:
-        return []
+        return [], []
     path, sym = target.split("::", 1)
     if not os.path.isfile(os.path.join(ROOT, path)):
-        return []
+        return [], []
     with open(os.path.join(ROOT, path), encoding="utf-8", errors="ignore") as fh:
         lines = fh.read().splitlines()
     idx = [i for i, ln in enumerate(lines)
            if re.search(r"\b%s\s*[:=]" % re.escape(sym), ln)]
     if not idx:
-        return []
+        return [], []
     value = _whole_value(lines, idx[0], sym, path)
     if value.startswith(("TOO LARGE", "STALE", "AMBIGUOUS")):
-        return []
+        return [], []
     lits = {m.group(1) or m.group(3) for m in _LITERAL.finditer(value)}
     lits = {l for l in lits if l and l not in ("true", "false", "null")}
+    # A short plain word ('app', 'web', 'game') is vocabulary, not a copied value. It
+    # echoes in most files, and each edit to one of them un-confirms the claim.
+    lits = {l for l in lits if len(l) >= ECHO_MIN_WORD or not l.isalpha()}
     if not lits:
-        return []
-    echoes = []
+        return [], []
+    hits_by_file = []
     for rel in parsed:
         if rel == path:
             continue
@@ -2333,8 +2345,20 @@ def value_echo(target, parsed):
         hit = sorted(l for l in lits if re.search(r"(?<![\w.])%s(?![\w.])"
                                                   % re.escape(l), body))
         if hit:
-            echoes.append((rel, hit))
-    return echoes
+            hits_by_file.append((rel, hit))
+    counts = {}
+    for _rel, hit in hits_by_file:
+        for l in hit:
+            counts[l] = counts.get(l, 0) + 1
+    # A literal that many files carry is vocabulary too, however long it is.
+    cap = max(ECHO_MAX_FILES, int(len(parsed) * ECHO_MAX_SHARE))
+    common = sorted(l for l, n in counts.items() if n > cap)
+    echoes = []
+    for rel, hit in hits_by_file:
+        kept = [l for l in hit if l not in common]
+        if kept:
+            echoes.append((rel, kept))
+    return echoes, [(l, counts[l]) for l in common]
 
 
 def code_graph():
@@ -2674,7 +2698,10 @@ def cmd_graph(args):
         """Printed with every answer, including a complete one. What this graph states is
         stated imports. A file holding its own copy of a value depends on it just as
         hard, is invisible here, and breaks in silence when the value moves."""
-        echoes = value_echo(target, parsed)
+        echoes, common = value_echo(target, parsed)
+        if common:
+            print("  VALUE ECHO skipped, too common to mean coupling: " + ", ".join(
+                "'%s' (%d files)" % (lit, n) for lit, n in common))
         if echoes:
             print(f"  VALUE ECHO: {len(echoes)} parsed file(s) repeat a literal from this "
                   f"definition without naming it. Coincidence is possible; silent "

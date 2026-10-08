@@ -44,7 +44,8 @@ Everything lives in `template/` and copies into your project as is.
 
 | Part | Path | What it is |
 |---|---|---|
-| Rules | `CLAUDE.md` | The orchestrator's contract: roles, the work loop, routing table, memory rules, review gate, git rules. `AGENTS.md` points at it so other tools read the same file. |
+| Rules | `CLAUDE.md` | The orchestrator's contract, kept short: roles, the work loop, routing table, reporting, git rules, and a "Read on demand" table naming which rules file to read before which kind of work. `AGENTS.md` points at it so other tools read the same file. |
+| Rules on demand | `.viber/docs/rules/*.md` | The detail CLAUDE.md points at, read only when that work comes up: `memory.md` (record CLI and rules), `truth.md` (TRUTH.md and plans), `learning.md` (signals, lessons, remedies), `review-gate.md` (accepting a handoff, the review gate). Each binds as if written in CLAUDE.md. |
 | Agents | `.claude/agents/*.md` | Six definitions, one per kind of work, each with a default model: `analyst` (opus), `builder` (opus), `coder` (sonnet), `grunt` (haiku), `reviewer` (sonnet), `runner` (haiku, executes a written test or capture plan and returns artifacts, never a verdict). |
 | Hooks | `.claude/settings.json` | `SessionStart` regenerates memory into context; `UserPromptSubmit` does that again and lists what is hanging, so every prompt starts current. |
 | CLI | `.viber/bin/viber` | One Python file the orchestrator runs: records, facts, lessons, findings, signals, truth check, code graph, health report. |
@@ -132,7 +133,7 @@ python3 .viber/bin/viber init
 
 Copying into an existing project overwrites `CLAUDE.md`, `AGENTS.md` and `.gitignore`. Extract into an empty folder first and merge by hand if you already have those.
 
-There is no update command. To pick up a newer viber, `git -C viber pull`, run the same `git archive` line again and diff `CLAUDE.md` before overwriting your edits.
+There is no update command. To pick up a newer viber, `git -C viber pull`, run the same `git archive` line again and diff `CLAUDE.md` and `.viber/docs/rules/` before overwriting your edits.
 
 ## Recommended workflow
 
