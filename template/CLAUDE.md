@@ -47,7 +47,11 @@ No fixed pipeline: reality inserts corrections between any two steps. Run one lo
 
 Two decisions. **The agent is the kind of work**: its scope, what it must not do, how it reports. **The model is chosen per spawn**, by you. A definition's `model:` is only a floor: a spawn where you chose nothing runs on it instead of your own, pricier model. Aliases pick up new releases on their own.
 
-`effort` cannot change at spawn: it lives in the definition. Work needing a very different depth of thinking is a different agent (`grunt` thinks little, `builder` a lot), not the same agent spawned differently.
+**Effort is chosen per spawn too**, with the Agent tool's `effort` parameter (a relayed session takes `--effort`). The floor is `medium`; never `low`.
+
+- `medium`: the approach is decided and someone checks the result (the review gate, a test, you looking at every artifact). Most work.
+- `high`: the result is trusted without re-checking (a root cause, a design, a migration, a money or auth judgement), or edge cases are likely.
+- `xhigh`: only after the same piece failed twice at `high`, or for a security audit.
 
 | The work is | Agent | Default model |
 |---|---|---|
@@ -70,16 +74,17 @@ Tie-breaks: brief says what to do, `coder` (the review gate catches what it miss
 
 - **`reviewer` is never routed by these questions.** Only the review gate calls it.
 - **`runner` is never routed by these questions either.** Whoever wrote a test or capture plan may hand it to `runner`. It returns artifacts and mechanical checks, never a verdict: the caller looks at every screenshot and output itself before calling anything tested.
+- **A build, suite, simulator session or capture is a plan for `runner`, not commands you run yourself.** Every tool call you make re-reads your whole context on your model; a long session running builds and sims burns most of the budget. A one-line check stays yours.
 
 **Step 2, the model for this spawn.** Start from the agent's default; move at most one tier (haiku, sonnet, opus) per answer:
 
-1. **Will the result be trusted without anyone re-checking it?** A root cause, a design, anything touching money, auth, security, or unrecoverable data. Go up.
+1. **Will the result be trusted without anyone re-checking it?** A root cause, a design, a judgement about money, auth, security, or unrecoverable data. Go up. Carrying out a decided brief in those areas is not this: the review gate checks it.
 2. **Will you, or a reviewer, check every part of it anyway?** Every screenshot, number, diff. Go down: the check is where the quality comes from.
 3. **Would a wrong result be caught only by the owner?** Go up. The owner is not a test suite.
 4. **Must the agent read more than about 100k tokens?** Avoid `haiku`: its price jumps past that size, and a long read is where a small model drops things.
 5. **Did this agent already fail this same piece twice on this model?** Go up one tier. Never a third try on the same model.
 
-Name the chosen model and a one-line reason in the spawn, so a wrong call is visible afterwards. When nothing applies, the default stands. **Always name an agent**; a bare one inherits your model and price on the cheapest work.
+Name the chosen model and a one-line reason in the spawn, so a wrong call is visible afterwards. When nothing applies, the default stands. **Always name an agent**, never `general-purpose` or a bare spawn: those inherit your model and price on the cheapest work.
 
 ## 4. Memory and documents
 
@@ -130,7 +135,8 @@ Scope-claim evidence, `unresolved` handling, finding records and **the review ga
 
 - **Read narrowly** (`limit`/`offset`). Check `index.md` before searching the codebase; if not there, search, then record what you found.
 - **Your memory of a file expires when anything writes to it**, and you are not told. Before relying on a file for a decision, run `git log --oneline -3 -- <file>` and `git status --short`; re-read anything a subagent, a script, or a linter could have touched.
-- **Cheapest correct tool first.** A direct read or grep beats a subagent. Delegation pays for a system prompt, reading, and a report; under about ten files or a handful of edits, do it yourself.
+- **Cheapest correct tool first.** A direct read or grep beats a subagent. Delegation pays for a system prompt, reading, and a report; under about ten files or a handful of edits, do it yourself, while your context is small. Once it is large, each of your calls costs that whole context, and a multi-command run is cheaper in an agent.
+- **Keep your own context short.** Every turn re-reads the whole conversation, so its size multiplies every call. Start a fresh session for each unrelated batch of work; state lives in records and files, not in the chat.
 - **An owner budget is a hard cap.** Say so before exceeding it, never after.
 - **Never wait by polling.** No `sleep`, log re-reads, or re-armed watches. Run anything over a minute in the background and keep working or end the turn; block only when there is nothing else. (A subagent is never woken, so it waits on its own jobs and finishes in the same run.)
 
