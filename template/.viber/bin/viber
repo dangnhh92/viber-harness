@@ -2808,12 +2808,67 @@ def cmd_graph(args):
     die("usage: viber graph [build|deps <id>|orphans]")
 
 
+# PreToolUse guard. Spawns must carry a deliberate agent, model and effort (CLAUDE.md
+# section 3); a bare spawn inherits the orchestrator's model on the cheapest work.
+# Heavy runs in the main session get a nudge only: one quick check there is fine.
+HEAVY_RE = re.compile(r"\b(xcodebuild|simctl|flutter\s+(test|build|drive)|gradlew?|maestro|"
+                      r"playwright|pytest|heavy\.sh)\b")
+SPAWNS = os.path.join(MEM, ".spawns.jsonl")
+
+
+def _hook_out(decision=None, reason=None, context=None):
+    out = {"hookEventName": "PreToolUse"}
+    if decision:
+        out["permissionDecision"] = decision
+        out["permissionDecisionReason"] = reason
+    if context:
+        out["additionalContext"] = context
+    print(json.dumps({"hookSpecificOutput": out}))
+
+
+def cmd_guard(_args):
+    try:
+        ev = json.load(sys.stdin)
+    except ValueError:
+        return 0
+    tool, inp = ev.get("tool_name"), ev.get("tool_input") or {}
+    if tool in ("Agent", "Task"):
+        kind, model, effort = inp.get("subagent_type"), inp.get("model"), inp.get("effort")
+        problems = []
+        if not kind or kind == "general-purpose":
+            problems.append("name an agent from .claude/agents (never general-purpose or a bare spawn)")
+        if kind != "fork" and not model:
+            problems.append("pass model")
+        if kind != "fork" and not effort:
+            problems.append("pass effort")
+        if effort == "low":
+            problems.append("effort floor is medium")
+        try:
+            os.makedirs(MEM, exist_ok=True)
+            with open(SPAWNS, "a") as fh:
+                fh.write(json.dumps({"at": now(), "agent": kind, "model": model, "effort": effort,
+                                     "refused": bool(problems)}) + "\n")
+        except OSError:
+            pass
+        if problems:
+            _hook_out("deny", "Spawn refused: " + "; ".join(problems) + ". Choose per CLAUDE.md "
+                      "section 3: decided brief that gets checked = coder/sonnet/medium; find the "
+                      "cause or design = builder/opus/high; written test or capture plan = "
+                      "runner/haiku/medium. Then spawn again with the reason in the prompt.")
+    elif tool == "Bash" and not ev.get("agent_id"):
+        if HEAVY_RE.search(inp.get("command") or ""):
+            _hook_out(context="This looks like a runner job (build, suite, simulator or capture). "
+                      "Every command you run re-reads your whole context; write the plan and hand "
+                      "it to runner unless this is a one-line check.")
+    return 0
+
+
 COMMANDS = {"new": cmd_new, "set": cmd_set, "list": cmd_list, "show": cmd_show,
             "fact": cmd_fact,
             "state": cmd_state, "index": cmd_index, "check": cmd_check, "init": cmd_init,
             "doctor": cmd_doctor,
             "trigger": cmd_trigger, "lessons": cmd_lessons, "finding": cmd_finding,
-            "truth": cmd_truth, "graph": cmd_graph}
+            "truth": cmd_truth, "graph": cmd_graph, "guard": cmd_guard}
 
 
 def main():

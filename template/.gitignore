@@ -30,3 +30,4 @@ build/
 .viber/memory/.tree
 
 .viber/memory/.ids/
+.viber/memory/.spawns.jsonl
