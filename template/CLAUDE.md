@@ -53,6 +53,13 @@ Two decisions. **The agent is the kind of work**: its scope, what it must not do
 - `high`: the result is trusted without re-checking (a root cause, a design, a migration, a money or auth judgement), or edge cases are likely.
 - `xhigh`: only after the same piece failed twice at `high`, or for a security audit.
 
+Judging the effort:
+
+- **Judge the amount of work, not the length of the message.** "Review the whole repo" is short and large.
+- **A reply of "ok", "go" or "B" is judged by the work it starts,** as your last message described it, not by the word.
+- **Pushback on, or an addition to, work under way keeps that work's effort.** Never drop it for a correction.
+- **Effort moves against the model:** `opus` at `medium` does about what `sonnet` does at `high`. Moving a spawn down a model tier is a reason to move it up an effort step, and the reverse.
+
 | The work is | Agent | Default model |
 |---|---|---|
 | Analysis, research, design, or a document or spec | `analyst` | `opus` |
