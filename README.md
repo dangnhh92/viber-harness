@@ -161,9 +161,17 @@ Start with none. When a problem keeps coming back, add the one plugin that fixes
 | Symbol lookups by grep miss things | the LSP plugin for your stack (`typescript-lsp`, `swift-lsp`) |
 | You want to talk to the orchestrator away from the desk | `telegram` (set `ackReaction` so you see the message landed) |
 | Deploys, databases, designs live in a service | that service's plugin: `vercel`, `firebase`, `supabase`, `github`, `figma`, `railway` |
-| UI and copy come out generic | `frontend-design`, and the skill `impeccable` for a UI, UX and copy audit |
 
-Some plugins overlap with what viber already does: `superpowers` (its process skills compete with the clarify step; viber's `CLAUDE.md` wins as user instructions), `code-review` and `commit-commands` (viber has its own review gate and commit rules). Know that before enabling them.
+Leave these off, they fight viber: `superpowers` (its process skills override the clarify step and the routing), `frontend-design` (a second UI rule set beside `designing-interfaces`), `code-review` and `commit-commands` (viber has its own review gate and commit rules).
+
+## Skills that ship with viber
+
+They live in `.claude/skills/` and load only when the work matches.
+
+| Skill | Use it for |
+|---|---|
+| `designing-interfaces` | Building or reviewing any UI: one pass/fail rule set, data-display rules for dashboards and charts, and a verification checklist |
+| `serving-mobile-ads` | Writing or auditing AdMob loading in an iOS or Android app: load on intent, expiry, retry, consent, measuring show rate |
 
 <details>
 <summary>CLI reference (the orchestrator runs these)</summary>
