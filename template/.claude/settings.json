@@ -8,6 +8,15 @@
             "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/.viber/bin/viber\" state"
           }
         ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/.viber/bin/viber\" recompact"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -26,7 +35,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Agent|Task|Bash",
+        "matcher": "Agent|Task|Bash|Edit|Write|MultiEdit",
         "hooks": [
           {
             "type": "command",

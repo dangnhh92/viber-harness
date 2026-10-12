@@ -15,6 +15,8 @@ state.md and index.md are generated; never hand-edit them.
   viber finding <file> "<problem>" [--severity high]   record a review finding, repeats detected automatically
   viber trigger <kind> "<what happened>"   raise a learning signal
   viber lessons --for <role> [--tags a,b] [--limit 5]   ranked, capped lesson recall
+  viber guard          PreToolUse hook: refuse bare spawns, nudge, re-inject rules files (reads stdin)
+  viber recompact      SessionStart(compact) hook: list the files CLAUDE.md says to read on demand
   viber doctor         plain language health report: is this project being run properly
   viber init           scaffold the layout in the current directory
 """
@@ -23,6 +25,7 @@ import ast
 import hashlib
 import os
 import re
+import select
 import subprocess
 import sys
 from datetime import date, datetime
@@ -1206,6 +1209,15 @@ def cmd_check(_args):
         print("[viber check] for you, not for the owner. Decide what each one needs,\n                do it, and only raise with the owner what genuinely needs their call:")
         for n in notes:
             print("  - " + n)
+    if trig:
+        rel = _on_demand_files().get("learning")
+        if rel:
+            try:
+                blocks = _rules_nudges(_read_hook_payload(), [rel])
+            except Exception:
+                blocks = []     # same contract as the guard: a nudge never fails the hook
+            for block in blocks:
+                print("\n" + block)
     return 0
 
 
@@ -2826,12 +2838,419 @@ def _hook_out(decision=None, reason=None, context=None):
     print(json.dumps({"hookSpecificOutput": out}))
 
 
+# Rules re-injection. CLAUDE.md names rules files to read before certain work, and a
+# compaction drops them while nothing says so. The guard injects the file at its trigger
+# when the transcript shows no read and no earlier injection since the last compaction.
+# Every part is a nudge: nothing here denies a call, and any doubt means silence.
+ON_DEMAND_KEYS = (("memory", "rules/memory.md"), ("truth", "rules/truth.md"),
+                  ("learning", "rules/learning.md"), ("gate", "rules/review-gate.md"),
+                  ("relay", "skills/relay"))
+REVIEW_FACT = ("viber: no reviewer has read this change since the last code edit (review "
+               "gate). The commit is local; run the reviewer before pushing.")
+COMPACT_BOUNDARY = b"compact_boundary"
+READER_RE = re.compile(r"\b(cat|sed|head|tail|bat|less|more|nl)\b")
+COMMIT_SUBJECT_RE = re.compile(r"^(feat|fix|refactor)(\([^)\n]*\))?!?:")
+HEREDOC_MSG_RE = re.compile(r"^\$\(\s*cat\s*<<-?\s*(['\"]?)(\w+)\1[^\n]*\n(.*)", re.S)
+SHELL_KEYWORDS = {"if", "then", "else", "elif", "while", "until", "do", "!", "{"}
+# Wrapper -> the flags that take a separate value, so the value is not read as the command.
+WRAPPER_FLAG_ARGS = {"env": {"-u", "-C", "-S"}, "sudo": {"-u", "-g", "-C"},
+                     "timeout": {"-s", "-k"}, "nice": {"-n"}, "command": set()}
+SHELL_RUNNERS = {"bash", "sh", "zsh", "dash"}
+DOC_EXT = (".md", ".mdx", ".txt", ".rst")
+
+
+def read_on_demand_rows():
+    """The CLAUDE.md "Read on demand" table as (path, raw line) pairs, header rows skipped."""
+    rows, inside = [], False
+    for line in _read(os.path.join(ROOT, "CLAUDE.md")).splitlines():
+        if line.startswith("## "):
+            if inside:
+                break
+            inside = line.strip().lower() == "## read on demand"
+            continue
+        if not inside or not line.startswith("|"):
+            continue
+        cell = line.strip().strip("|").split("|")[0].strip().strip("`").strip()
+        if not cell or cell.lower() == "read" or set(cell) <= set("-: "):
+            continue
+        rows.append((cell, line.rstrip()))
+    return rows
+
+
+def _on_demand_files():
+    """Trigger key -> rules file, only for rows this project's CLAUDE.md really has."""
+    found = {}
+    for cell, _line in read_on_demand_rows():
+        path = cell.replace("\\", "/")
+        for key, suffix in ON_DEMAND_KEYS:
+            bare = path[:-len("/SKILL.md")] if path.endswith("/SKILL.md") else path.rstrip("/")
+            if not (bare == suffix or bare.endswith("/" + suffix)):
+                continue
+            rel = path if path.endswith(".md") else bare + "/SKILL.md"
+            if os.path.isfile(os.path.join(ROOT, rel)):
+                found[key] = rel
+    return found
+
+
+def _shell_segments(cmd):
+    """Split a shell command into pipeline segments of unquoted words. Quoted text, comments
+    and heredoc bodies stay inside one word or are dropped, so a string that only mentions
+    a command is never mistaken for running it."""
+    segments, words, cur = [], [], []
+    state = {"has": False}
+    pending = []
+    n, i = len(cmd), 0
+
+    def end_word():
+        if state["has"]:
+            words.append("".join(cur))
+            del cur[:]
+            state["has"] = False
+
+    def end_segment():
+        end_word()
+        if words:
+            segments.append(list(words))
+            del words[:]
+
+    while i < n:
+        c = cmd[i]
+        if c == "'":
+            j = cmd.find("'", i + 1)
+            j = n if j < 0 else j
+            cur.append(cmd[i + 1:j])
+            state["has"] = True
+            i = j + 1
+        elif c == '"':
+            i += 1
+            state["has"] = True
+            while i < n and cmd[i] != '"':
+                if cmd[i] == "\\" and i + 1 < n:
+                    nxt = cmd[i + 1]
+                    cur.append(nxt if nxt in '"\\$`' else "\\" + nxt)
+                    i += 2
+                elif cmd.startswith("$(", i):
+                    # A command substitution opens a fresh quoting context, so a quote
+                    # inside it does not end this word. Commit messages arrive this way.
+                    m = re.compile(r"\$\(\s*cat\s*<<-?\s*(['\"]?)(\w+)\1[^\n]*\n").match(cmd, i)
+                    stop = None
+                    if m:
+                        e = re.compile(r"\n[ \t]*" + re.escape(m.group(2)) + r"[ \t]*\n?[ \t]*\)"
+                                       ).search(cmd, m.end() - 1)
+                        stop = e.end() if e else None
+                    if stop is None:
+                        depth, k = 0, i + 1
+                        while k < n:
+                            depth += {"(": 1, ")": -1}.get(cmd[k], 0)
+                            k += 1
+                            if depth == 0:
+                                break
+                        stop = k
+                    cur.append(cmd[i:stop])
+                    i = stop
+                else:
+                    cur.append(cmd[i])
+                    i += 1
+            i += 1
+        elif c == "\\":
+            if i + 1 < n and cmd[i + 1] != "\n":
+                cur.append(cmd[i + 1])
+                state["has"] = True
+            i += 2
+        elif c in " \t":
+            end_word()
+            i += 1
+        elif c == "\n":
+            end_segment()
+            i += 1
+            for delim in pending:
+                while i < n:
+                    j = cmd.find("\n", i)
+                    j = n if j < 0 else j
+                    line = cmd[i:j].strip()
+                    i = j + 1
+                    if line == delim:
+                        break
+            pending = []
+        elif c == "#" and not state["has"]:
+            j = cmd.find("\n", i)
+            i = n if j < 0 else j
+        elif c == "&" and i > 0 and cmd[i - 1] in "<>":
+            cur.append(c)
+            state["has"] = True
+            i += 1
+        elif c in ";&|()":
+            end_segment()
+            i += 1
+        elif cmd.startswith("<<", i) and not cmd.startswith("<<<", i):
+            end_word()
+            m = re.compile(r"<<-?[ \t]*(['\"]?)([\w.-]+)\1").match(cmd, i)
+            if m:
+                pending.append(m.group(2))
+                i = m.end()
+            else:
+                i += 2
+        else:
+            cur.append(c)
+            state["has"] = True
+            i += 1
+    end_segment()
+    return segments
+
+
+def _segment_command(words):
+    """(script, args): the program a segment runs, looking through env assignments, shell
+    keywords, wrappers with their flags and a python interpreter in front of a script."""
+    i, n = 0, len(words)
+    while i < n:
+        w = words[i]
+        if re.match(r"^[A-Za-z_]\w*=", w) or w in SHELL_KEYWORDS or w in ("time", "nohup", "exec"):
+            i += 1
+        elif w in WRAPPER_FLAG_ARGS:
+            takes, i = WRAPPER_FLAG_ARGS[w], i + 1
+            while i < n and words[i].startswith("-") and len(words[i]) > 1:
+                if w == "command" and words[i] in ("-v", "-V"):
+                    return "", []
+                i += 2 if words[i] in takes else 1
+            if w == "timeout" and i < n and re.match(r"^\d", words[i]):
+                i += 1
+        else:
+            break
+    if i >= n:
+        return "", []
+    if re.match(r"^python[\d.]*$", os.path.basename(words[i])):
+        j = i + 1
+        while j < n and words[j].startswith("-"):
+            j += 2 if words[j] == "-m" else 1
+        return (words[j], words[j + 1:]) if j < n else ("", [])
+    return words[i], words[i + 1:]
+
+
+def _commit_subject(args, cwd):
+    """First line of the message a `git commit` is given by -m or -F, or None."""
+    k = 0
+    while k < len(args) and args[k].startswith("-"):
+        k += 2 if args[k] in ("-C", "-c") else 1
+    if k >= len(args) or args[k] != "commit":
+        return None
+    rest, msg, i = args[k + 1:], None, 0
+    while i < len(rest) and msg is None:
+        a = rest[i]
+        if re.match(r"^-[A-Za-z]*m$", a) or a == "--message":
+            msg = rest[i + 1] if i + 1 < len(rest) else None
+            break
+        if a.startswith("--message="):
+            msg = a[len("--message="):]
+        elif re.match(r"^-[A-Za-z]*m.+", a) and not a.startswith("--"):
+            msg = a[a.index("m", 1) + 1:]
+        elif a in ("-F", "--file") or a.startswith("--file="):
+            target = a[len("--file="):] if "=" in a else (rest[i + 1] if i + 1 < len(rest) else "")
+            if target and target != "-":
+                msg = _read(os.path.join(cwd or ROOT, target))
+            break
+        i += 1
+    if not msg:
+        return None
+    m = HEREDOC_MSG_RE.match(msg.lstrip())
+    text = m.group(3) if m else msg
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return None
+
+
+def _bash_triggers(cmd, cwd):
+    """(keys, commit): which rules apply to what this command runs, and whether it is a
+    feat, fix or refactor commit."""
+    keys, commit = set(), False
+    if not any(s in cmd for s in ("viber", "git", "relay.py", "index.md")):
+        return keys, commit
+    work = [(w, 0) for w in _shell_segments(cmd)]
+    while work:
+        words, depth = work.pop()
+        script, args = _segment_command(words)
+        base = os.path.basename(script)
+        if base in SHELL_RUNNERS and depth < 3:
+            # The string after -c is a script of its own, so it is parsed the same way.
+            for k, a in enumerate(args[:-1]):
+                if re.match(r"^-[A-Za-z]*c$", a):
+                    work.extend((w, depth + 1) for w in _shell_segments(args[k + 1]))
+                    break
+        elif base == "viber" and args:
+            if args[0] in ("new", "set", "fact", "show", "list"):
+                keys.add("memory")
+            if args[0] == "new" and args[1:2] == ["lesson"]:
+                keys.add("learning")
+            if args[0] == "truth":
+                keys.add("truth")
+        elif base in ("grep", "egrep", "fgrep", "rg"):
+            if any(a.endswith(".viber/memory/index.md") for a in args):
+                keys.add("memory")
+        elif base == "git":
+            subject = _commit_subject(args, cwd)
+            if subject and COMMIT_SUBJECT_RE.match(subject):
+                keys.add("gate")
+                commit = True
+        elif base == "relay.py":
+            keys.add("relay")
+            if args[:1] == ["run"] and any(a == "--edit" or a.startswith("--edit=") for a in args):
+                keys.add("gate")
+    return keys, commit
+
+
+def _edit_triggers(path):
+    p = "/" + str(path).replace("\\", "/").lstrip("/")
+    if "/.viber/docs/" in p and p.endswith(".md") and "/.viber/docs/rules/" not in p:
+        return {"truth"}
+    return set()
+
+
+def _is_code_path(path):
+    p = "/" + str(path).replace("\\", "/").lstrip("/")
+    # .viber/bin holds the CLI itself, which is code that needs review like any other.
+    memory_or_docs = "/.viber/" in p and "/.viber/bin/" not in p
+    return not (memory_or_docs or "/docs/" in p or p.lower().endswith(DOC_EXT))
+
+
+def _lines_backward(path, block=1 << 20):
+    """Lines of a file from the last to the first, without holding the file in memory."""
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        pos, tail = fh.tell(), b""
+        while pos > 0:
+            take = min(block, pos)
+            pos -= take
+            fh.seek(pos)
+            parts = (fh.read(take) + tail).split(b"\n")
+            tail = parts[0]
+            for line in reversed(parts[1:]):
+                if line:
+                    yield line
+        if tail:
+            yield tail
+
+
+def _loads(line):
+    try:
+        o = json.loads(line)
+    except ValueError:
+        return None
+    return o if isinstance(o, dict) else None
+
+
+def _tool_uses(o):
+    content = (o.get("message") or {}).get("content") if o.get("type") == "assistant" else None
+    return [(b.get("name"), b.get("input") or {}) for b in reversed(content or [])
+            if isinstance(b, dict) and b.get("type") == "tool_use"]
+
+
+def _rules_header(rel):
+    return ("viber: %s governs this step and is not in your context since the last "
+            "compaction; it follows:" % rel)
+
+
+def _bash_reads(cmd, rel):
+    """True when a segment of cmd runs a reader on the rules file itself, so a grep of it
+    or a commit message that names it does not count as having read it."""
+    for words in _shell_segments(cmd):
+        script, args = _segment_command(words)
+        if READER_RE.fullmatch(os.path.basename(script)) and any(
+                a == rel or a.replace("\\", "/").endswith("/" + rel) for a in args):
+            return True
+    return False
+
+
+def _already_in_context(o, line, rel):
+    if o.get("isSidechain"):
+        return False
+    if o.get("type") == "attachment":
+        return _rules_header(rel).encode() in line
+    skill = os.path.basename(os.path.dirname(rel)) if rel.endswith("/SKILL.md") else None
+    for name, inp in _tool_uses(o):
+        if name == "Read" and isinstance(inp.get("file_path"), str):
+            p = inp["file_path"].replace("\\", "/")
+            if p == rel or p.endswith("/" + rel):
+                return True
+        elif name == "Bash" and rel in str(inp.get("command", "")) \
+                and _bash_reads(str(inp.get("command", "")), rel):
+            return True
+        elif name == "Skill" and skill and inp.get("skill") == skill:
+            return True
+    return False
+
+
+def _review_event(o):
+    """'edit' or 'reviewed' for the newest code change or reviewer spawn in this line."""
+    if o.get("isSidechain"):
+        return None
+    for name, inp in _tool_uses(o):
+        if name in ("Agent", "Task"):
+            kind = inp.get("subagent_type")
+            if kind == "reviewer":
+                return "reviewed"
+            # A coder edits in its own context, so the spawn is the only trace it leaves.
+            if kind in ("coder", "builder", "grunt"):
+                return "edit"
+        elif name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+            if _is_code_path(inp.get("file_path") or inp.get("notebook_path") or ""):
+                return "edit"
+    return None
+
+
+def _scan_window(path, rels, want_review):
+    """Walk the transcript newest first, back to the last compaction boundary. Returns
+    (rules files still missing from context, review state), or None when it is unreadable."""
+    pending, review = set(rels), None
+    try:
+        for line in _lines_backward(path):
+            if COMPACT_BOUNDARY in line:
+                o = _loads(line)
+                if o and o.get("type") == "system" and o.get("subtype") == "compact_boundary":
+                    break
+            for rel in list(pending):
+                skill = rel.endswith("/SKILL.md") and b'"Skill"' in line
+                if rel.encode() in line or skill:
+                    o = _loads(line)
+                    if o and _already_in_context(o, line, rel):
+                        pending.discard(rel)
+            if want_review and review is None and b"tool_use" in line and (
+                    b'"Edit"' in line or b'"Write"' in line or b'"MultiEdit"' in line
+                    or b'"NotebookEdit"' in line or b"subagent_type" in line):
+                o = _loads(line)
+                review = _review_event(o) if o else None
+            if not pending and (not want_review or review is not None):
+                break
+    except OSError:
+        return None
+    return pending, review
+
+
+def _rules_nudges(payload, rels, want_review=False):
+    """Context blocks for the rules files that are not in context, plus the review fact."""
+    path = payload.get("transcript_path")
+    if not isinstance(path, str) or not path or not (rels or want_review):
+        return []
+    found = _scan_window(path, rels, want_review)
+    if found is None:
+        return []
+    missing, review = found
+    blocks = []
+    for rel in rels:
+        text = _read(os.path.join(ROOT, rel)) if rel in missing else ""
+        if text:
+            blocks.append(_rules_header(rel) + "\n" + text)
+    if want_review and review == "edit":
+        blocks.append(REVIEW_FACT)
+    return blocks
+
+
 def cmd_guard(_args):
     try:
         ev = json.load(sys.stdin)
     except ValueError:
         return 0
     tool, inp = ev.get("tool_name"), ev.get("tool_input") or {}
+    contexts, keys, commit = [], set(), False
     if tool in ("Agent", "Task"):
         kind, model, effort = inp.get("subagent_type"), inp.get("model"), inp.get("effort")
         problems = []
@@ -2855,11 +3274,54 @@ def cmd_guard(_args):
                       "section 3: decided brief that gets checked = coder/sonnet/medium; find the "
                       "cause or design = builder/opus/high; written test or capture plan = "
                       "runner/haiku/medium. Then spawn again with the reason in the prompt.")
+            return 0
+        if kind in ("coder", "builder", "grunt") and not ev.get("agent_id"):
+            keys.add("gate")
     elif tool == "Bash" and not ev.get("agent_id"):
-        if HEAVY_RE.search(inp.get("command") or ""):
-            _hook_out(context="This looks like a runner job (build, suite, simulator or capture). "
-                      "Every command you run re-reads your whole context; write the plan and hand "
-                      "it to runner unless this is a one-line check.")
+        command = inp.get("command") or ""
+        if HEAVY_RE.search(command):
+            contexts.append("This looks like a runner job (build, suite, simulator or capture). "
+                            "Every command you run re-reads your whole context; write the plan and hand "
+                            "it to runner unless this is a one-line check.")
+    try:
+        if tool == "Bash" and not ev.get("agent_id"):
+            keys, commit = _bash_triggers(inp.get("command") or "", ev.get("cwd"))
+        elif tool in ("Edit", "Write", "MultiEdit") and not ev.get("agent_id"):
+            keys = _edit_triggers(inp.get("file_path") or "")
+        if keys:
+            files = _on_demand_files()
+            rels = [files[k] for k, _s in ON_DEMAND_KEYS if k in keys and k in files]
+            contexts.extend(_rules_nudges(ev, rels, want_review=commit and "gate" in files))
+    except Exception:
+        # A nudge is never worth a failed tool call: a transcript line of an unexpected
+        # shape must leave the call untouched, so the whole injection path fails open.
+        pass
+    if contexts:
+        _hook_out(context="\n\n".join(contexts))
+    return 0
+
+
+def _read_hook_payload():
+    """The JSON a hook receives on stdin, or {} when none is waiting. `viber check` also
+    runs by hand, and a read on a terminal or an open pipe must never hang it."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return {}
+        if not select.select([sys.stdin], [], [], 0.1)[0]:
+            return {}
+        return json.loads(sys.stdin.read())
+    except (OSError, ValueError):
+        return {}
+
+
+def cmd_recompact(_args):
+    rows = read_on_demand_rows()
+    if not rows:
+        return 0
+    print("Compaction dropped these files from your context; each binds again at its trigger.\n")
+    print("| Read | When |\n|---|---|")
+    for _cell, line in rows:
+        print(line)
     return 0
 
 
@@ -2868,7 +3330,8 @@ COMMANDS = {"new": cmd_new, "set": cmd_set, "list": cmd_list, "show": cmd_show,
             "state": cmd_state, "index": cmd_index, "check": cmd_check, "init": cmd_init,
             "doctor": cmd_doctor,
             "trigger": cmd_trigger, "lessons": cmd_lessons, "finding": cmd_finding,
-            "truth": cmd_truth, "graph": cmd_graph, "guard": cmd_guard}
+            "truth": cmd_truth, "graph": cmd_graph, "guard": cmd_guard,
+            "recompact": cmd_recompact}
 
 
 def main():
