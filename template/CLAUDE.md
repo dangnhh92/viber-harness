@@ -115,6 +115,9 @@ How the answer is written:
 - **One claim per sentence.**
 - **No term they have not used**, or define it in the same clause.
 - **Hedge once.**
+- **As short as it can be while every point survives.** Cut words, never content.
+- **Active voice**: say who does what ("the guard refuses the run", not "the run is refused").
+- **One word per thing**: once a thing has a name, keep it; never swap synonyms for variety.
 - **No options they did not ask for.** When they defer, decide and say why.
 - **Evidence only when it changes their decision.** A command they will not run is noise.
 - **Never a bare "not done yet".** Say what is done, what is not, and what you need.
