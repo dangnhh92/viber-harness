@@ -65,11 +65,20 @@ Run the sections the question needs. For "is everything ok", run all five.
 - Processes, ports, scheduled jobs and lock files with no owner: started by a session that is gone, or a port no session claims. List them; do not kill them.
 - Committed-but-unpushed or pushed-but-unmerged work per project.
 
+## Root cause before remedy
+
+A finding is a symptom. Before proposing any change, take each one a level down:
+- **Root cause**, with evidence: why it happened, not that it happened.
+- **Class**: harness (recurs in any project under the current setup), local (one project, session or episode), or already fixed (the cause changed after the data was recorded). Measure only data after the last relevant change, split by session start.
+- **Worth fixing**: its cost per week now against the fix's own cost. A new rule, gate or nudge costs tokens every turn, blocks falsely and rots. "Leave it" is a valid answer.
+
+Propose a change only for a harness cause that is still happening and worth it, at the root, never a patch on the symptom.
+
 ## Report to the owner
 
 In the owner's language and style, conclusion first:
 1. A one-line verdict: running ok or not, and the single biggest problem.
-2. Findings ranked by cost to the owner (money, wrong answers, their time). Each gives what happened, how often, the evidence, and the proposed change.
+2. Findings ranked by cost to the owner (money, wrong answers, their time). Each gives what happened, how often, the evidence, its root cause and class, and either the proposed change or why to leave it.
 3. What was not checked, and why.
 
 Open a record for each finding the owner approves. Change nothing they have not approved.
