@@ -1716,6 +1716,10 @@ def unconfirmed_claims(claims):
 
 def cmd_truth(args):
     sub = args[0] if args else "check"
+    # `confirm` writes the lock, so an argument it does not understand must stop
+    # it rather than be ignored: `viber truth confirm --help` used to confirm.
+    if sub == "confirm" and len(args) > 1:
+        die("viber truth confirm takes no arguments (got %s)" % " ".join(args[1:]))
     claims = truth_claims()
     if claims is None:
         die(f"no truth file. Expected {os.path.relpath(TRUTH, ROOT)}")
