@@ -22,6 +22,7 @@ state.md and index.md are generated; never hand-edit them.
 """
 import json
 import ast
+import functools
 import hashlib
 import os
 import re
@@ -112,10 +113,19 @@ def parse(path):
     return meta
 
 
+_RECORDS_CACHE = None
+
+
 def all_records():
-    """A directory listing is a snapshot. Another session may be renaming a freshly
+    """Parsed once per process: `check` asks for every record hundreds of times. The cache
+    is dropped by write_record, the only code here that writes a record file.
+
+    A directory listing is a snapshot. Another session may be renaming a freshly
     reserved file while we read, so a file that vanishes is skipped rather than fatal.
     Reservations themselves carry no id yet and are skipped for the same reason."""
+    global _RECORDS_CACHE
+    if _RECORDS_CACHE is not None:
+        return list(_RECORDS_CACHE)
     if not os.path.isdir(RECORDS):
         return []
     out = []
@@ -128,7 +138,9 @@ def all_records():
             continue
         if rec.get("id"):
             out.append(rec)
-    return sorted(out, key=lambda r: r.get("id", ""))
+    # Callers share these dicts: mutate a record only on the way to write_record, which drops the cache.
+    _RECORDS_CACHE = sorted(out, key=lambda r: r.get("id", ""))
+    return list(_RECORDS_CACHE)
 
 
 def find(rid):
@@ -190,8 +202,12 @@ def write_record(rec):
         if rec.get(extra):
             fm.append(f"{extra}: {rec[extra]}")
     text = "---\n" + "\n".join(fm) + "\n---\n\n" + (rec.get("_body") or "") + "\n"
-    with open(rec["_path"], "w", encoding="utf-8") as fh:
-        fh.write(text)
+    global _RECORDS_CACHE
+    try:
+        with open(rec["_path"], "w", encoding="utf-8") as fh:
+            fh.write(text)
+    finally:
+        _RECORDS_CACHE = None
 
 
 # ---------- generated views ----------
@@ -1910,6 +1926,7 @@ def _eat_regex(text, i, out):
     return None
 
 
+@functools.lru_cache(maxsize=None)
 def _strip_literals(text, hashes=False, keep_strings=False, regex=False):
     """Blank out comments and string bodies, keeping length and line breaks so anything
     found afterwards is code. Done character by character because a regex pass cannot tell
