@@ -3289,6 +3289,181 @@ def _git_publish(args):
     return k < len(args) and args[k] in ("commit", "push")
 
 
+SUB_COMMIT_DENY = ("A subagent never commits or pushes, with or without " + COMMIT_OK + ". Leave the change "
+                   "uncommitted and say in your HANDOFF that it is ready: the main session commits it.")
+UNKNOWN_CD_DENY = ("A cd earlier in this command has a target the guard cannot resolve ($VAR, $(...) or -), so it "
+                   "cannot tell which repo this commit or push goes to. Run it as git -C <literal path> instead.")
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+UNKNOWN_DIR = object()
+
+
+def _project_root():
+    return os.environ.get("CLAUDE_PROJECT_DIR") or ROOT
+
+
+def _is_orchestrator():
+    return os.path.exists(os.path.join(_project_root(), ".viber", "orchestrator"))
+
+
+def _cross_repo_deny(repo):
+    root = _project_root()
+    return ("You are in project %s; this touches repo %s; another project's repo is changed only by that "
+            "project's session or the orchestrator; describe the change in your report instead."
+            % (os.path.basename(os.path.realpath(root)) or root, repo))
+
+
+def _repo_identity(top):
+    """The main repo a work tree belongs to. A linked worktree has a .git file that points
+    into <main>/.git/worktrees/<name>; it is the same repo as <main>, not another project."""
+    top = os.path.realpath(top)
+    try:
+        with open(os.path.join(top, ".git"), encoding="utf-8") as fh:
+            m = re.match(r"gitdir:\s*(.*?)[/\\]\.git[/\\]worktrees[/\\][^/\\]+\s*$", fh.read().strip())
+        if m:
+            return os.path.realpath(m.group(1))
+    except (OSError, UnicodeDecodeError):
+        pass
+    return top
+
+
+def _inside(path, parent):
+    try:
+        return os.path.commonpath([path, parent]) == parent
+    except ValueError:
+        return False
+
+
+def _repo_toplevel(directory):
+    """Real path of the work tree root at directory, or None on any failure or after 2 seconds."""
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+    try:
+        p = subprocess.run(["git", "-C", directory, "rev-parse", "--show-toplevel"], capture_output=True,
+                           text=True, timeout=2, env=env)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    out = p.stdout.strip()
+    return os.path.realpath(out) if p.returncode == 0 and out else None
+
+
+def _foreign_repo_for_dir(directory):
+    """The repo at directory when it is another project's, else None. Any failed lookup,
+    including the project's own, means no verdict: a flaky lookup must not block work."""
+    if os.path.exists(os.path.join(_project_root(), ".viber", "orchestrator")):
+        return None
+    root = os.path.realpath(_project_root())
+    if _inside(_resolve_path(directory), root):
+        return None
+    target = _repo_toplevel(directory)
+    mine = _repo_toplevel(root)
+    if not target or not mine:
+        return None
+    if _repo_identity(target) == _repo_identity(mine) or _inside(target, root):
+        return None
+    return target
+
+
+def _shell_dir(value, base):
+    """Absolute directory a shell word names, or UNKNOWN_DIR when it needs the shell to expand."""
+    if value == "-":
+        return UNKNOWN_DIR
+    value = os.path.expandvars(os.path.expanduser(value))
+    if "$" in value or "`" in value:
+        return UNKNOWN_DIR
+    if base is UNKNOWN_DIR and not os.path.isabs(value):
+        return UNKNOWN_DIR
+    return os.path.normpath(os.path.join(base, value)) if base is not UNKNOWN_DIR else os.path.normpath(value)
+
+
+def _cd_target(args, base):
+    """Directory after `cd args` run from base, or base when the words are not a cd target."""
+    rest = [a for a in args if not (a.startswith("-") and a != "-")]
+    return _shell_dir(rest[0] if rest else "~", base)
+
+
+def _git_target_dir(prefix, args, base):
+    """Directory a git call acts on: the shell directory moved by -C options, then the
+    work tree, or the parent of the .git dir, when one is named by option or GIT_* variable."""
+    here, work_tree, git_dir, k = base, None, None, 0
+    for w in prefix:
+        m = re.match(r"^GIT_(DIR|WORK_TREE)=(.*)$", w)
+        if m and m.group(1) == "DIR":
+            git_dir = m.group(2)
+        elif m:
+            work_tree = m.group(2)
+    while k < len(args) and args[k].startswith("-"):
+        a = args[k]
+        val = args[k + 1] if k + 1 < len(args) else ""
+        if a == "-C":
+            here = _shell_dir(val, here)
+        elif a == "--work-tree":
+            work_tree = val
+        elif a == "--git-dir":
+            git_dir = val
+        elif a.startswith("--work-tree="):
+            work_tree = a.split("=", 1)[1]
+        elif a.startswith("--git-dir="):
+            git_dir = a.split("=", 1)[1]
+        k += 2 if a in GIT_OPT_WITH_VALUE else 1
+    if work_tree is not None:
+        return _shell_dir(work_tree, here)
+    if git_dir is not None:
+        gd = _shell_dir(git_dir, here)
+        if gd is not UNKNOWN_DIR and os.path.basename(gd) == ".git":
+            return os.path.dirname(gd)
+        return gd
+    return here
+
+
+def _resolve_path(path):
+    """Real path of path, also when the tail does not exist yet: the nearest existing parent
+    is resolved, so a symlinked /tmp compares equal to its target."""
+    path = os.path.abspath(path)
+    tail = []
+    while not os.path.lexists(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        tail.append(os.path.basename(path))
+        path = parent
+    path = os.path.realpath(path)
+    for part in reversed(tail):
+        path = os.path.join(path, part)
+    return path
+
+
+def _nearest_repo_root(path):
+    """Directory holding a .git entry (dir or file) above path, found without git."""
+    d = os.path.dirname(_resolve_path(path))
+    while True:
+        if os.path.lexists(os.path.join(d, ".git")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def _edit_ask(inp, cwd):
+    """The deny text for an edit of a file inside another project's repo, else None."""
+    root = _project_root()
+    if os.path.exists(os.path.join(root, ".viber", "orchestrator")):
+        return None
+    path = inp.get("file_path") or inp.get("notebook_path")
+    if not isinstance(path, str) or not path:
+        return None
+    path = os.path.expanduser(path)
+    if not os.path.isabs(path):
+        path = os.path.join(cwd if isinstance(cwd, str) and cwd else root, path)
+    real_root = os.path.realpath(root)
+    repo = _nearest_repo_root(path)
+    if repo is None or _inside(repo, real_root) or _inside(_resolve_path(path), real_root):
+        return None
+    mine = _nearest_repo_root(os.path.join(real_root, "x"))
+    if mine is not None and _repo_identity(repo) == _repo_identity(mine):
+        return None
+    return _cross_repo_deny(repo)
+
+
 def _names_env_file(words):
     for w in words:
         # --env-file=.env and <.env name the file after the = or the redirect.
@@ -3299,34 +3474,61 @@ def _names_env_file(words):
     return False
 
 
-def _bash_ask(command):
-    """The deny text for a commit, push or env read that lacks its leading marker, else None.
-    Segments come from _shell_segments, so quoted text and heredoc bodies are never read as
-    commands, and wrappers (env, sudo, bash -c, a subshell, $(...)) are looked through."""
+def _bash_ask(command, is_sub=False, cwd=None):
+    """The deny text for a commit, push or env read, else None. A subagent never commits or
+    pushes. A main session may not commit or push into another project's repo, marker or not;
+    elsewhere a commit or push needs its leading marker. Segments come from _shell_segments, so
+    quoted text and heredoc bodies are never read as commands, and wrappers (env, sudo,
+    bash -c, a subshell, $(...)) are looked through. Segments run in order so `cd` is tracked."""
     if not any(s in command for s in ("git", "env")):
         return None
-    work = [(w, 0) for w in _shell_segments(command)]
-    work += [(w, 1) for inner in re.findall(r"`([^`]*)`", command) for w in _shell_segments(inner)]
-    while work:
-        words, depth = work.pop()
-        script, args = _segment_command(words)
-        prefix = words[:len(words) - len(args) - (1 if script else 0)]
-        base = os.path.basename(script)
-        if depth < 3:
-            for w in words:
-                if "$(" in w:
-                    work.extend((s, depth + 1) for s in _shell_segments(w[w.index("$(") + 2:]))
-            if base in SHELL_RUNNERS:
-                for k, a in enumerate(args[:-1]):
-                    if re.match(r"^-[A-Za-z]*c$", a):
-                        work.extend((s, depth + 1) for s in _shell_segments(args[k + 1]))
-                        break
-        if base == "git" and _git_publish(args):
-            if COMMIT_OK not in prefix:
-                return COMMIT_ASK
-        elif _names_env_file(words) and ENV_OK not in prefix:
-            return ENV_ASK
-    return None
+    start = os.path.abspath(cwd) if isinstance(cwd, str) and cwd else os.path.abspath(_project_root())
+
+    def scan(segments, depth, here):
+        for words in segments:
+            script, args = _segment_command(words)
+            prefix = words[:len(words) - len(args) - (1 if script else 0)]
+            base = os.path.basename(script)
+            if base in ("cd", "pushd"):
+                here = _cd_target(args, here)
+            if depth < 3:
+                for w in words:
+                    if "$(" in w:
+                        found = scan(_shell_segments(w[w.index("$(") + 2:]), depth + 1, here)
+                        if found:
+                            return found
+                if base in SHELL_RUNNERS:
+                    for k, a in enumerate(args[:-1]):
+                        if re.match(r"^-[A-Za-z]*c$", a):
+                            found = scan(_shell_segments(args[k + 1]), depth + 1, here)
+                            if found:
+                                return found
+                            break
+                elif base == "eval" and args:
+                    # eval joins its arguments with spaces and runs the result as a script.
+                    found = scan(_shell_segments(" ".join(args)), depth + 1, here)
+                    if found:
+                        return found
+            if base == "git" and _git_publish(args):
+                if is_sub:
+                    return SUB_COMMIT_DENY
+                target = _git_target_dir(prefix, args, here)
+                if target is UNKNOWN_DIR and here is UNKNOWN_DIR and not _is_orchestrator():
+                    return UNKNOWN_CD_DENY
+                if target is not UNKNOWN_DIR:
+                    foreign = _foreign_repo_for_dir(target)
+                    if foreign:
+                        return _cross_repo_deny(foreign)
+                if COMMIT_OK not in prefix:
+                    return COMMIT_ASK
+            elif _names_env_file(words) and ENV_OK not in prefix:
+                return ENV_ASK
+        return None
+
+    found = scan(_shell_segments(command), 0, start)
+    for inner in re.findall(r"`([^`]*)`", command):
+        found = found or scan(_shell_segments(inner), 1, start)
+    return found
 
 
 def cmd_guard(_args):
@@ -3338,7 +3540,9 @@ def cmd_guard(_args):
     contexts, keys, commit = [], set(), False
     # The owner asked (2026-10-14) for a question at every commit, push and env read, by any agent:
     # a coder committed before its reviewer ran (Luxette fe25b02). Each call is asked afresh.
-    ask = _bash_ask(inp.get("command") or "") if tool == "Bash" else None
+    ask = _bash_ask(inp.get("command") or "", bool(ev.get("agent_id")), ev.get("cwd")) if tool == "Bash" else None
+    if tool in EDIT_TOOLS:
+        ask = _edit_ask(inp, ev.get("cwd"))
     if tool == "Read" and _names_env_file([inp.get("file_path") or ""]):
         ask = ENV_ASK
     if tool == "Grep" and _names_env_file([inp.get("path") or "", inp.get("glob") or ""]):
