@@ -82,6 +82,7 @@ Tie-breaks: brief says what to do, `coder` (the review gate catches what it miss
 - **`reviewer` is never routed by these questions.** Only the review gate calls it.
 - **`runner` is never routed by these questions either.** Whoever wrote a test or capture plan may hand it to `runner`. It returns artifacts and mechanical checks, never a verdict: the caller looks at every screenshot and output itself before calling anything tested.
 - **A build, suite, simulator session or capture is a plan for `runner`, not commands you run yourself.** Every tool call you make re-reads your whole context on your model; a long session running builds and sims burns most of the budget. A one-line check stays yours.
+- **A capture or walkthrough gets a written plan first**: the data to seed, the screens, the steps. `runner` executes it and you look at every artifact, so a capture is never a reason for `builder` or for a higher tier. A one-off instruction in a brief ("the owner checks these by eye") binds that task only, never the tier rules.
 
 **Step 2, the model for this spawn.** Start from the agent's default; move at most one tier (haiku, sonnet, opus) per answer:
 

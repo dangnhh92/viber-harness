@@ -34,6 +34,7 @@ A `feat`, `fix` or `refactor` commit is not made until a fresh `reviewer` has re
 - **It does not run for** `chore` and `docs` commits, a diff with no code file, or `grunt` output (spot-read the rule instead). The owner can waive it for one commit; record the waiver as a decision with the reason.
 - **Size is never a reason to skip.** A small diff is a cheap review.
 - **Dispatch** with the contract record ids and the output of `viber lessons --for reviewer`. Never re-narrate the change; the reviewer reads the diff.
+- **The reviewer runs `sonnet` at `medium`**, whatever the change touches. You audit every finding and round 2 is the re-check, so its verdict is never "trusted without re-checking" and money, auth or size are no reason to raise it.
 - **What blocks the commit:** any high, and any in-scope medium. A low never blocks.
 - **Audit before you send back.** Re-verify every high and every in-scope medium yourself; a wrong finding sent back costs a fix round. Send the survivors, verbatim, to the same agent that built the change. It fixes only what is listed and returns a new `HANDOFF:`.
 - **Two reviews, then stop.** Round 2 is a fresh `reviewer` spawn over the same base, never round 1 continued, and it is not told what round 1 found. Round 2 with no high and no in-scope medium means accept: run the project suite once, `viber truth check`, commit. Round 2 still carrying one means the fix is not landing: do not commit, stop the implementer, and decide yourself whether to fix it, re-scope it, or put it in front of the owner. Never run a third round.

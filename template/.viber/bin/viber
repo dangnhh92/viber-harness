@@ -3265,6 +3265,70 @@ def _rules_nudges(payload, rels, want_review=False):
     return blocks
 
 
+COMMIT_OK = "VIBER_COMMIT_OK=1"
+ENV_OK = "VIBER_ENV_OK=1"
+ENV_ASK = ("This reads an env file, which usually holds live secrets. Does your brief, or the owner, explicitly "
+           "let you read this file? If yes, run it through Bash prefixed with " + ENV_OK + ". If not, do not read "
+           "it: ask the agent that spawned you, or the owner if nobody spawned you.")
+# .env, .env.<x>, <x>.env, env.<stage>, globs included; the committed templates are not secrets.
+ENV_NAME_RE = re.compile(r"\.env(?:[.*?][\w.*?-]*)?|[\w*?-]+\.env"
+                         r"|env\.(?:production|prod|local|development|dev|test|staging)(?:\.[\w*?-]+)?")
+ENV_SAFE_RE = re.compile(r"\.env\.(?:example|sample|template)")
+GIT_OPT_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
+COMMIT_ASK = ("You are about to commit or push. Does your brief, or a standing rule from the owner, explicitly "
+              "give you that authority for this change? If yes, run the same command again prefixed with "
+              + COMMIT_OK + ". If not, do not commit or push: ask the agent that spawned you (say it in your "
+              "HANDOFF), or the owner if nobody spawned you.")
+
+
+def _git_publish(args):
+    """True when git's args are commit or push, after any global options."""
+    k = 0
+    while k < len(args) and args[k].startswith("-"):
+        k += 2 if args[k] in GIT_OPT_WITH_VALUE else 1
+    return k < len(args) and args[k] in ("commit", "push")
+
+
+def _names_env_file(words):
+    for w in words:
+        # --env-file=.env and <.env name the file after the = or the redirect.
+        for part in re.split(r"[=<>]", w):
+            base = part.rstrip("/").rsplit("/", 1)[-1]
+            if ENV_NAME_RE.fullmatch(base) and not ENV_SAFE_RE.fullmatch(base):
+                return True
+    return False
+
+
+def _bash_ask(command):
+    """The deny text for a commit, push or env read that lacks its leading marker, else None.
+    Segments come from _shell_segments, so quoted text and heredoc bodies are never read as
+    commands, and wrappers (env, sudo, bash -c, a subshell, $(...)) are looked through."""
+    if not any(s in command for s in ("git", "env")):
+        return None
+    work = [(w, 0) for w in _shell_segments(command)]
+    work += [(w, 1) for inner in re.findall(r"`([^`]*)`", command) for w in _shell_segments(inner)]
+    while work:
+        words, depth = work.pop()
+        script, args = _segment_command(words)
+        prefix = words[:len(words) - len(args) - (1 if script else 0)]
+        base = os.path.basename(script)
+        if depth < 3:
+            for w in words:
+                if "$(" in w:
+                    work.extend((s, depth + 1) for s in _shell_segments(w[w.index("$(") + 2:]))
+            if base in SHELL_RUNNERS:
+                for k, a in enumerate(args[:-1]):
+                    if re.match(r"^-[A-Za-z]*c$", a):
+                        work.extend((s, depth + 1) for s in _shell_segments(args[k + 1]))
+                        break
+        if base == "git" and _git_publish(args):
+            if COMMIT_OK not in prefix:
+                return COMMIT_ASK
+        elif _names_env_file(words) and ENV_OK not in prefix:
+            return ENV_ASK
+    return None
+
+
 def cmd_guard(_args):
     try:
         ev = json.load(sys.stdin)
@@ -3272,6 +3336,16 @@ def cmd_guard(_args):
         return 0
     tool, inp = ev.get("tool_name"), ev.get("tool_input") or {}
     contexts, keys, commit = [], set(), False
+    # The owner asked (2026-10-14) for a question at every commit, push and env read, by any agent:
+    # a coder committed before its reviewer ran (Luxette fe25b02). Each call is asked afresh.
+    ask = _bash_ask(inp.get("command") or "") if tool == "Bash" else None
+    if tool == "Read" and _names_env_file([inp.get("file_path") or ""]):
+        ask = ENV_ASK
+    if tool == "Grep" and _names_env_file([inp.get("path") or "", inp.get("glob") or ""]):
+        ask = ENV_ASK
+    if ask:
+        _hook_out("deny", ask)
+        return 0
     if tool in ("Agent", "Task"):
         kind, model, effort = inp.get("subagent_type"), inp.get("model"), inp.get("effort")
         problems = []
