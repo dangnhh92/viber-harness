@@ -75,12 +75,13 @@ This section holds only what it does not state.
 - Low-purchase markets: prefer rewarded ads.
 
 **Do it right:**
+- Entitlement logic (grant, cache, restore, expiry, refund) follows `.claude/skills/iap-entitlement`, rules and required tests T1 to T19. This section covers store and review setup only.
 - Before asking someone to subscribe, describe what they get for the price. Period at least 7 days [ARG 3.1.2(a), 3.1.2(c)].
 - Subscription apps have working in-app Privacy and Terms links.
 - Restore:
   - iOS: only from a Restore row, never at launch (it can pop an Apple ID prompt during review).
   - Android: restore silently at launch.
-- On launch, re-derive entitlement from `currentEntitlements` (StoreKit 2) or past purchases; downgrade when it is gone. A cancelled subscriber must not keep Premium.
+- Entitled only while now is before the expiry and nothing revoked it, at every read (launch, resume, store event); unreadable data means not entitled. A cancelled subscriber must not keep Premium.
 - Grants are idempotent, from one source. `approved` fires again on every launch and restore.
 - Server validation: a status-0 receipt proves the receipt is genuine, not that it belongs to this app or user. Check `bundle_id`; make the original transaction id unique per account.
 - Accept sandbox receipts in production; App Review buys with sandbox.

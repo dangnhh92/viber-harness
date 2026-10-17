@@ -42,6 +42,7 @@
 - Google sign-in on iOS with Supabase: `useIdTokenAuthRequest` returns no id_token on native. Use the code flow: send `sha256(nonce)`, call `exchangeCodeAsync`, pass the raw nonce.
 - Supabase links identities by verified email. Give any admin account an unverifiable address (for example `.internal`) so it never absorbs a real user's sign-in.
 - Google OAuth clients and the consent screen have no API. Send the owner one prefilled sheet: package, SHA-1 of the upload key and of the Play signing key, redirect URIs.
+- Google sign-in on Android with `expo-auth-session`: pass `androidClientId`. Without it the request falls back to the Web client and Google blocks it ("Custom scheme URIs are not allowed for 'WEB' client type", 400). Create one Android client per signing key (Play signing and upload), each with "Enable custom URI scheme" on under Advanced settings, and add every Android client id to the Supabase Google provider's client id list, since the id token's audience is the Android client.
 - Never delete `Podfile.lock`; it floats GoogleSignIn and AppAuth to new versions and can block a release.
 - A migration and the function that uses it deploy together.
 - Never report deletion as done while any step is stubbed.
@@ -114,6 +115,9 @@
 - Scale test before launch: seed realistic volume, `EXPLAIN (ANALYZE, BUFFERS)` every app, console, function and cron query, and compare totals as well as times. Targets: a member read at most 100 ms, a console aggregate at most 1 s.
 - Sum in the database; never fetch rows and add them in code.
 - Every paged read orders by a unique key; unordered pages double-count at scale.
+- Supabase (PostgREST) cuts every list read at `max_rows`, 1000 by default, with no error; the cap also cuts embedded child lists and set-returning RPCs. A history, log, order or transaction table passes 1000 rows early. Every read of a growing table either pages with `.range()` or aggregates in SQL (an RPC, or `count: 'exact', head: true`). Audit every read: app, console, server routes, edge functions, cron jobs, exports. Prove each one with a seed of more than 1000 rows against an independent SQL count.
+- A total shown beside a paged list comes from its own aggregate over the whole filtered set, never from the rows on the current page.
+- Filters and sorts run in SQL, never on fetched rows; a filter applied after the fetch only sees the first 1000 rows. Admin lists have an explicit default sort (newest first) and keep filters in the URL.
 - Filter by the member explicitly even under RLS. RLS stays the authority; the filter lets Postgres use the index.
 - Keep derived values derived (compute on read) until a measurement shows a read over its target. A stored summary is a second truth that can drift. Check equality in tests, never by recomputing in production.
 - Estimate cost, not only speed: CPU per query x users x opens per day, peak per second, then the compute size and price that carries it.
@@ -126,4 +130,5 @@
 **Check:**
 - Do both Supabase advisors report zero WARN?
 - Does the scale seed meet every read target, with totals matching the oracle?
+- Does every read of a growing table return the same count as SQL on a seed of more than 1000 rows?
 - Does a plan guard test fail on a deliberately dropped index?

@@ -9,6 +9,9 @@
 **Do it right:**
 - "Tested" means every flow walked through the real UI on a simulator or device, with simulated data through real ingest. Every displayed number is checked against an independent oracle script, for both user and admin. Direct table writes are unit tests only, never integration tests.
 - Derive every oracle figure from a written rule, never from the screen it checks.
+- A query rewrite (for speed or paging) is proven on a snapshot of production: run the old and new reads over every row, field and page, and report the mismatch count. Anything above 0 blocks the deploy.
+- A green suite proves the cases it covers, not that the feature works. Say which cases ran.
+- Shut down every simulator you booted or reused, and quit Simulator, when the run ends.
 - Reproduce review conditions: a fresh simulator (`xcrun simctl erase`), no sandbox account, slow or no network.
 - Device first for anything involving consent, ATT, push, IAP or haptics. The simulator hides the UMP code 4 failure and has no push token.
 - Look at every screenshot. Byte-identical "stills" and a test runner reporting COMPLETED on a blank screen are both common.

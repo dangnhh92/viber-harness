@@ -19,6 +19,10 @@ state.md and index.md are generated; never hand-edit them.
   viber recompact      SessionStart(compact) hook: list the files CLAUDE.md says to read on demand
   viber doctor         plain language health report: is this project being run properly
   viber init           scaffold the layout in the current directory
+  viber upgrade <project>... [--apply] [--force <path>] [--diff] [--allow-dirty]
+                       bring projects to this checkout's template; a dry run unless --apply.
+                       Run it from the checkout: python3 <viber>/template/.viber/bin/viber upgrade ...
+  viber version        the template version this project was last upgraded to
 """
 import json
 import ast
@@ -1296,7 +1300,11 @@ def check_environment():
     else:
         try:
             cfg = json.loads(raw)
-            hooks = cfg.get("hooks", {})
+            hooks = cfg.get("hooks", {}) if isinstance(cfg, dict) else None
+            if not isinstance(hooks, dict):
+                broken.append("`hooks` in .claude/settings.json is not an object of events, so "
+                              "Claude Code runs none of them. Fix the file.")
+                hooks = {}
             # Both go on UserPromptSubmit, because that is where hook output reaches
             # the agent. Stop runs, prints, and nobody reads it, so a check wired there
             # is inert while looking wired.
@@ -1450,6 +1458,10 @@ def cmd_doctor(_args):
         if gap >= 14:
             drift.append(f"The code has moved on {gap} days past the last design update. "
                          f"The plan probably describes a product that no longer exists.")
+
+    print("\nTemplate")
+    for line in _template_report():
+        print("  " + line)
 
     print("\nGit")
     print(f"  last commit: {_git('log', '-1', '--pretty=%cr: %s') or 'none'}")
@@ -2231,6 +2243,38 @@ _GD_RES = re.compile(r"""(?:preload|load)\s*\(\s*["']res://([^"']+)["']\s*\)""")
 _GD_EXTENDS = re.compile(r"""(?:^|\n)\s*extends\s+(?:["']res://([^"']+)["']|([A-Za-z_]\w*))""")
 
 
+def _godot_root(rel):
+    """`res://` means the Godot project root, the directory that holds project.godot. That
+    is often not the repository root, for example a game kept under src/. Resolving
+    res:// against the repository root fails every isfile check, so every GDScript edge
+    drops and `depended on by (0)` reads like an answer. A repository can hold several
+    Godot projects, so the nearest project.godot above the script wins. Cached per
+    directory, because many scripts share one."""
+    d, walked = os.path.dirname(rel), []
+    while d not in _GODOT_ROOTS:
+        walked.append(d)
+        if os.path.isfile(os.path.join(ROOT, d, "project.godot")) or not d:
+            _GODOT_ROOTS[d] = d
+            break
+        d = os.path.dirname(d)
+    for w in walked:
+        _GODOT_ROOTS[w] = _GODOT_ROOTS[d]
+    return _GODOT_ROOTS[d]
+
+
+_GODOT_ROOTS = {}
+
+
+def _res_target(path, importer):
+    """A res:// path in the script `importer` as a repository-relative file, or None when
+    nothing is there."""
+    for prefix in (_godot_root(importer), ""):
+        cand = os.path.normpath(os.path.join(prefix, path)) if prefix else os.path.normpath(path)
+        if os.path.isfile(os.path.join(ROOT, cand)):
+            return cand
+    return None
+
+
 def _parse_gd(rel, text):
     """GDScript. Comments are `#`, strings quote the same way Python's do, so the Python
     side of the tokenizer applies.
@@ -2246,13 +2290,13 @@ def _parse_gd(rel, text):
     decls |= {m.group(1) for m in _GD_CLASS_NAME.finditer(src)}
     imports = []
     for m in _GD_RES.finditer(spec_src):
-        target = os.path.normpath(m.group(1))
-        if os.path.isfile(os.path.join(ROOT, target)):
+        target = _res_target(m.group(1), rel)
+        if target:
             imports.append((target, "*"))
     for m in _GD_EXTENDS.finditer(spec_src):
         if m.group(1):
-            target = os.path.normpath(m.group(1))
-            if os.path.isfile(os.path.join(ROOT, target)):
+            target = _res_target(m.group(1), rel)
+            if target:
                 imports.append((target, "*"))
     return decls, imports, _count_idents(src)
 
@@ -3293,6 +3337,26 @@ SUB_COMMIT_DENY = ("A subagent never commits or pushes, with or without " + COMM
                    "uncommitted and say in your HANDOFF that it is ready: the main session commits it.")
 UNKNOWN_CD_DENY = ("A cd earlier in this command has a target the guard cannot resolve ($VAR, $(...) or -), so it "
                    "cannot tell which repo this commit or push goes to. Run it as git -C <literal path> instead.")
+# macOS `security` subcommands that change a keychain or a system security setting, from
+# `man security`. Reads (find-*, dump-*, show-*, export, verify-cert) pass. A changed search
+# list or partition list breaks code signing for every app on the machine, so a person
+# approves each change.
+KEYCHAIN_WRITES = {"create-keychain", "delete-keychain", "lock-keychain", "unlock-keychain",
+                   "set-keychain-settings", "set-keychain-password", "create-keypair",
+                   "add-generic-password", "add-internet-password", "add-certificates",
+                   "delete-generic-password", "delete-internet-password",
+                   "set-generic-password-partition-list", "set-internet-password-partition-list",
+                   "set-key-partition-list", "delete-certificate", "delete-identity",
+                   "set-identity-preference", "create-db", "import", "install-mds",
+                   "add-trusted-cert", "remove-trusted-cert", "trust-settings-import",
+                   "create-filevaultmaster-keychain", "execute-with-privileges", "platformsso"}
+# These only display state unless one of these arguments follows the subcommand.
+KEYCHAIN_SETTERS = {"list-keychains": {"-s"}, "default-keychain": {"-s"}, "login-keychain": {"-s"},
+                    "user-trust-settings-enable": {"-d", "-e"}, "smartcards": {"-d", "-e"},
+                    "authorizationdb": {"write", "remove", "reset"}, "filevault": {"set", "reset"}}
+KEYCHAIN_ASK = ("This changes a macOS keychain or a system security setting. A changed keychain, search list "
+                "or partition list can break code signing for every app on this machine. Approve it only if "
+                "you meant to make that change.")
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 UNKNOWN_DIR = object()
 
@@ -3475,12 +3539,12 @@ def _names_env_file(words):
 
 
 def _bash_ask(command, is_sub=False, cwd=None):
-    """The deny text for a commit, push or env read, else None. A subagent never commits or
+    """The deny text for a commit, push or env read, KEYCHAIN_ASK for a keychain change, else None. A subagent never commits or
     pushes. A main session may not commit or push into another project's repo, marker or not;
     elsewhere a commit or push needs its leading marker. Segments come from _shell_segments, so
     quoted text and heredoc bodies are never read as commands, and wrappers (env, sudo,
     bash -c, a subshell, $(...)) are looked through. Segments run in order so `cd` is tracked."""
-    if not any(s in command for s in ("git", "env")):
+    if not any(s in command for s in ("git", "env", "security")):
         return None
     start = os.path.abspath(cwd) if isinstance(cwd, str) and cwd else os.path.abspath(_project_root())
 
@@ -3509,6 +3573,16 @@ def _bash_ask(command, is_sub=False, cwd=None):
                     found = scan(_shell_segments(" ".join(args)), depth + 1, here)
                     if found:
                         return found
+            if base == "security":
+                # Global flags such as -v or -q come before the subcommand. -i and -p read
+                # commands from stdin, which the guard cannot see.
+                at = next((k for k, a in enumerate(args) if not a.startswith("-")), None)
+                flags = args[:at] if at is not None else args
+                if any(re.match(r"^-[a-z]*[ip]", a) for a in flags):
+                    return KEYCHAIN_ASK
+                sub, rest = (args[at], set(args[at + 1:])) if at is not None else ("", set())
+                if sub in KEYCHAIN_WRITES or rest & KEYCHAIN_SETTERS.get(sub, set()):
+                    return KEYCHAIN_ASK
             if base == "git" and _git_publish(args):
                 if is_sub:
                     return SUB_COMMIT_DENY
@@ -3548,7 +3622,9 @@ def cmd_guard(_args):
     if tool == "Grep" and _names_env_file([inp.get("path") or "", inp.get("glob") or ""]):
         ask = ENV_ASK
     if ask:
-        _hook_out("deny", ask)
+        # A keychain change goes to the person as a permission prompt; the others deny
+        # with a question the agent answers by rerunning with its marker.
+        _hook_out("ask" if ask is KEYCHAIN_ASK else "deny", ask)
         return 0
     if tool in ("Agent", "Task"):
         kind, model, effort = inp.get("subagent_type"), inp.get("model"), inp.get("effort")
@@ -3617,10 +3693,726 @@ def cmd_recompact(_args):
     rows = read_on_demand_rows()
     if not rows:
         return 0
+    # A summary is the model's own memory, written without its sources; numbers in it
+    # were repeated as fact after compactions (2026-10-16, a dropped results row).
+    print("The summary above is memory, not evidence. Before repeating any number, "
+          "test result or state from it, re-read its source.\n")
     print("Compaction dropped these files from your context; each binds again at its trigger.\n")
     print("| Read | When |\n|---|---|")
     for _cell, line in rows:
         print(line)
+    return 0
+
+
+# Upgrade. The checkout's own CLI runs against each target project, because a project
+# older than this command carries a CLI without it. The template finds the project;
+# the project never needs to know where the template lives.
+MANIFEST_REL = os.path.join(".viber", "manifest.json")
+TEMPLATE_LOCK_REL = os.path.join(".viber", "template.lock")
+PROJECT_MARKER = "<!-- viber: project rules go below this line; upgrade keeps them -->"
+VIBER_HOOK_RE = re.compile(r"\.viber/bin/viber\b")
+TEMPLATE_SKIP = {".DS_Store", "__pycache__"}
+SETTINGS_KEY = ".claude/settings.json"
+MCP_FILE = ".mcp.json"
+DIFF_LINES = 60
+
+
+def _blob_id(data):
+    """The id git gives these bytes, so a file is matched against template history
+    without reading every old version."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _text_id(text):
+    return _blob_id(text.encode("utf-8"))
+
+
+def _decode(data):
+    try:
+        return data.decode("utf-8")
+    except (UnicodeDecodeError, AttributeError):
+        return None
+
+
+def _manifest_kind(manifest, rel):
+    for kind in ("split", "merged", "seeded", "owned"):
+        for entry in manifest.get(kind, []):
+            if rel == entry or (entry.endswith("/") and rel.startswith(entry)):
+                return kind
+    return None
+
+
+class _Template:
+    """The template at <checkout>/template, its manifest, and every version each path
+    ever had in the checkout's git history. Without git, only the current version is
+    known, so more project files read as edited and are skipped, never overwritten."""
+
+    def __init__(self, tdir):
+        self.dir = tdir
+        self.checkout = os.path.dirname(tdir)
+        with open(os.path.join(tdir, MANIFEST_REL), encoding="utf-8") as fh:
+            self.manifest = json.load(fh)
+        self.has_git = self._git("rev-parse", "--git-dir") is not None
+        # A file git ignores in the checkout, such as a cache, is not template content.
+        listed = None
+        if self.has_git:
+            out = self._git("ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "template")
+            if out is not None:
+                listed = {p[len("template/"):] for p in out.split("\0") if p.startswith("template/")}
+        self.files = {}
+        for base, dirs, names in os.walk(tdir):
+            dirs[:] = [d for d in dirs if d not in TEMPLATE_SKIP]
+            for name in names:
+                if name in TEMPLATE_SKIP or name.endswith(".pyc"):
+                    continue
+                full = os.path.join(base, name)
+                rel = os.path.relpath(full, tdir).replace(os.sep, "/")
+                if listed is not None and rel not in listed:
+                    continue
+                with open(full, "rb") as fh:
+                    self.files[rel] = (fh.read(), os.stat(full).st_mode & 0o777)
+        unknown = sorted(r for r in self.files if not _manifest_kind(self.manifest, r))
+        if unknown:
+            die("the template manifest does not classify: " + ", ".join(unknown))
+        self.history, self._blobs, self._blob_time = {}, {}, {}
+        self.source = "unknown"
+        if self.has_git:
+            self.source = (self._git("rev-parse", "--short=7", "HEAD") or "unknown").strip()
+            if (self._git("status", "--porcelain", "--", "template") or "").strip():
+                self.source += "+local"
+            self._load_history()
+
+    def _git(self, *args):
+        try:
+            r = subprocess.run(["git", "-C", self.checkout] + list(args),
+                               capture_output=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
+
+    def _load_history(self):
+        out = self._git("log", "--no-renames", "--raw", "-z", "--no-abbrev", "--format=@%ct",
+                        "--", "template/") or ""
+        parts = out.split("\0")
+        i, when = 0, None
+        while i < len(parts):
+            meta = parts[i].strip()
+            if meta.startswith("@"):
+                when = int(meta[1:]) if meta[1:].isdigit() else None
+                i += 1
+                continue
+            path = parts[i + 1] if i + 1 < len(parts) else ""
+            i += 2
+            if not meta.startswith(":") or not path.startswith("template/"):
+                continue
+            rel = path[len("template/"):]
+            seen = self.history.setdefault(rel, [])
+            for bid in meta.split()[2:4]:
+                if set(bid) != {"0"}:
+                    if bid not in seen:
+                        seen.append(bid)
+                    if when is not None:
+                        self._blob_time[bid] = min(when, self._blob_time.get(bid, when))
+
+    def first_seen(self, key):
+        """When the template first held this path, or this .mcp.json server, as a commit
+        time. None when no commit has it yet."""
+        rel, _, server = key.partition(":") if key.startswith(MCP_FILE + ":") else (key, "", "")
+        times = []
+        for bid in self.history.get(rel, []):
+            if bid not in self._blob_time:
+                continue
+            if server and server not in ((_load_json(self.blob(bid) or b"") or {}).get("mcpServers") or {}):
+                continue
+            times.append(self._blob_time[bid])
+        return min(times) if times else None
+
+    def blob(self, bid):
+        if bid not in self._blobs:
+            try:
+                r = subprocess.run(["git", "-C", self.checkout, "cat-file", "blob", bid],
+                                   capture_output=True, timeout=30)
+                self._blobs[bid] = r.stdout if r.returncode == 0 else None
+            except (OSError, subprocess.TimeoutExpired):
+                self._blobs[bid] = None
+        return self._blobs[bid]
+
+    def versions(self, rel):
+        """Every known version of a path as text, newest first, the current one included."""
+        out = []
+        if rel in self.files:
+            out.append(_decode(self.files[rel][0]))
+        for bid in self.history.get(rel, []):
+            text = _decode(self.blob(bid))
+            if text is not None and text not in out:
+                out.append(text)
+        return [t for t in out if t is not None]
+
+
+def _lines(text):
+    return {l.rstrip() for l in text.splitlines() if l.strip()}
+
+
+def _judge(cur, new, versions, locked):
+    """Is `cur` safe to replace with `new`? It is when it equals a known template
+    version, the version recorded at the last upgrade, or a known version plus lines
+    that the new template also has. The last case covers a hand copy of template
+    lines into a project, which loses nothing when the new template replaces it."""
+    if cur == new:
+        return {"state": "current"}
+    if _text_id(cur) == locked or cur in versions:
+        return {"state": "pristine"}
+    have, want = _lines(cur), _lines(new)
+    best = None
+    for v in versions:
+        old = _lines(v)
+        own = sorted(have - old - want)
+        lost = sorted((old - have) & want)
+        score = (len(own) + len(lost), len(have ^ old))
+        if best is None or score < best[0]:
+            best = (score, v, own, lost)
+    if best is None:
+        return {"state": "edited", "own": sorted(have - want), "lost": sorted(want - have),
+                "nearest": new}
+    _score, nearest, own, lost = best
+    if not own and not lost:
+        return {"state": "pristine"}
+    return {"state": "edited", "own": own, "lost": lost, "nearest": nearest}
+
+
+def _split_claude(text, headings):
+    """CLAUDE.md as (template part, project part). The marker line divides them. A file
+    from before the marker splits at the first `## ` heading that no template version
+    ever had, which is where every project put its own section."""
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.strip() == PROJECT_MARKER:
+            return "".join(lines[:i]).rstrip() + "\n", "".join(lines[i + 1:]).strip("\n")
+    for i, line in enumerate(lines):
+        if line.startswith("## ") and line.strip() not in headings:
+            return "".join(lines[:i]).rstrip() + "\n", "".join(lines[i:]).strip("\n")
+    return text.rstrip() + "\n", ""
+
+
+def _join_claude(generic, project):
+    out = generic.rstrip() + "\n\n" + PROJECT_MARKER + "\n"
+    return out + ("\n" + project.strip("\n") + "\n" if project.strip() else "")
+
+
+def _hook_lines(settings):
+    """The viber hooks in a settings.json, one line each. Only hooks that run
+    .viber/bin/viber are viber's; every other hook belongs to the project."""
+    out = []
+    hooks = (settings or {}).get("hooks")
+    for event, groups in sorted((hooks if isinstance(hooks, dict) else {}).items()):
+        for group in groups if isinstance(groups, list) else []:
+            for hook in (group.get("hooks") or []) if isinstance(group, dict) else []:
+                if isinstance(hook, dict) and VIBER_HOOK_RE.search(str(hook.get("command", ""))):
+                    out.append("%s [%s] %s" % (event, group.get("matcher", ""),
+                                               json.dumps(hook, sort_keys=True)))
+    return "\n".join(out) + "\n"
+
+
+def _hooks_usable(settings):
+    """A `hooks` value that upgrade can merge into: absent, or an object of lists."""
+    hooks = settings.get("hooks", {})
+    return isinstance(hooks, dict) and all(isinstance(g, list) for g in hooks.values())
+
+
+def _merge_hooks(project, template):
+    """The project's settings with its viber hooks swapped for the template's. Other
+    hooks and every other key stay as the project has them."""
+    merged = json.loads(json.dumps(project))
+    hooks = merged.setdefault("hooks", {})
+    for event in list(hooks):
+        kept = []
+        for group in hooks[event] if isinstance(hooks[event], list) else []:
+            if isinstance(group, dict) and isinstance(group.get("hooks"), list):
+                rest = [h for h in group["hooks"] if not (
+                    isinstance(h, dict) and VIBER_HOOK_RE.search(str(h.get("command", ""))))]
+                if not rest:
+                    continue
+                group = dict(group, hooks=rest)
+            kept.append(group)
+        hooks[event] = kept
+    for event, groups in (template.get("hooks") or {}).items():
+        ours = []
+        for group in groups:
+            mine = [h for h in group.get("hooks", [])
+                    if VIBER_HOOK_RE.search(str(h.get("command", "")))]
+            if mine:
+                ours.append(dict(group, hooks=mine))
+        hooks[event] = ours + hooks.get(event, [])
+    for event in [e for e, g in hooks.items() if not g]:
+        del hooks[event]
+    return merged
+
+
+def _canon(value):
+    return json.dumps(value, indent=2, sort_keys=True) + "\n"
+
+
+def _dump_json(value):
+    return (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _load_json(data):
+    try:
+        value = json.loads(data.decode("utf-8"))
+        return value if isinstance(value, dict) else None
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
+def _read_bytes(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _read_lock(root):
+    data = _read_bytes(os.path.join(root, TEMPLATE_LOCK_REL))
+    lock = _load_json(data) if data is not None else None
+    return lock if lock and isinstance(lock.get("files"), dict) else None
+
+
+def _claude_headings(tpl):
+    return {l.strip() for v in tpl.versions("CLAUDE.md") for l in v.splitlines()
+            if l.startswith("## ")}
+
+
+def _installed_ids(root, tpl=None):
+    """key -> id of what a project now holds for each part the template owns. The lock
+    stores the same ids, so doctor sees a local edit without the template at hand."""
+    ids = {}
+    lock = _read_lock(root) or {"files": {}}
+    for key in lock["files"]:
+        if key == "CLAUDE.md":
+            text = _decode(_read_bytes(os.path.join(root, key)) or b"")
+            if text is not None and PROJECT_MARKER in text:
+                ids[key] = _text_id(_split_claude(text, set())[0])
+        elif key == SETTINGS_KEY:
+            value = _load_json(_read_bytes(os.path.join(root, key)) or b"")
+            if value is not None:
+                ids[key] = _text_id(_hook_lines(value))
+        elif key.startswith(MCP_FILE + ":"):
+            value = _load_json(_read_bytes(os.path.join(root, MCP_FILE)) or b"")
+            servers = (value or {}).get("mcpServers")
+            server = servers.get(key.split(":", 1)[1]) if isinstance(servers, dict) else None
+            if server is not None:
+                ids[key] = _text_id(_canon(server))
+        else:
+            data = _read_bytes(os.path.join(root, key))
+            if data is not None:
+                ids[key] = _blob_id(data)
+    return ids
+
+
+def _viber_arrival(root):
+    """When viber came into the project: the earliest commit that touched .viber/. When
+    .viber/ is on disk but never committed, the repo's first commit. None for a fresh
+    install, a repo with no tracked files, or no git history."""
+    # Without .viber/ on disk this run is the install, so nothing was deleted yet.
+    if not os.path.isdir(os.path.join(root, ".viber")):
+        return None
+
+    def git_out(*args):
+        try:
+            r = subprocess.run(["git", "-C", root] + list(args),
+                               capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return r.stdout if r.returncode == 0 else ""
+
+    for scope in (".viber", "."):
+        times = [int(t) for t in git_out("log", "--format=%ct", "--", scope).split() if t.isdigit()]
+        if times:
+            return min(times)
+        # A repo that tracks no file says nothing about when viber came in.
+        if scope == ".viber" and not git_out("ls-files").strip():
+            return None
+    return None
+
+
+def _plan_upgrade(root, tpl, force):
+    """Every step an upgrade of `root` would take. Nothing is written here."""
+    lock = _read_lock(root)
+    locked = (lock or {}).get("files", {})
+    # Without a lock, a missing path the template had when viber came in was deleted on
+    # purpose. A path the template gained later was never here to delete.
+    start = None if lock else _viber_arrival(root)
+    steps, writes = [], {}
+
+    def step(action, key, note="", detail=None):
+        steps.append({"action": action, "key": key, "note": note, "detail": detail})
+
+    def deleted_here(key):
+        """True, after reporting it, when an unstamped project deleted this path."""
+        if start is None or key in force:
+            return False
+        since = tpl.first_seen(key)
+        if since is None or since > start:
+            return False
+        step("kept out", key, "deleted here: in the template since %s, before viber came into this "
+             "project on %s; --force %s adds it" % (day(datetime.fromtimestamp(since).isoformat()),
+                                                   day(datetime.fromtimestamp(start).isoformat()), key))
+        return True
+
+    def decide(key, cur, new, versions, removed_upstream=False):
+        """One owned part: returns True when the template version goes in."""
+        if cur is None:
+            if removed_upstream:
+                return False
+            if key in locked and key not in force:
+                step("kept out", key, "removed by the project; --force %s restores it" % key)
+                return False
+            if deleted_here(key):
+                # The lock keeps it out on every later upgrade too.
+                steps.append({"action": "lock", "key": key, "value": _text_id(new or "")})
+                return False
+            step("add", key)
+            return True
+        verdict = _judge(cur, new if new is not None else "", versions, locked.get(key))
+        if removed_upstream:
+            if verdict["state"] == "pristine" or key in force:
+                step("remove", key, "no longer in the template")
+                return True
+            step("SKIP", key, "no longer in the template, but edited here; --force %s removes it" % key)
+            return False
+        if verdict["state"] == "current":
+            step("current", key)
+            return True
+        if verdict["state"] == "pristine" or key in force:
+            step("update", key, "forced over local edits" if verdict["state"] == "edited" else "")
+            return True
+        step("SKIP", key, "edited in the project; --force %s overwrites it" % key,
+             dict(verdict, cur=cur))
+        return False
+
+    for rel, (data, mode) in sorted(tpl.files.items()):
+        kind = _manifest_kind(tpl.manifest, rel)
+        path = os.path.join(root, rel)
+        cur = _read_bytes(path)
+        if kind == "seeded":
+            if cur is None and (rel not in locked or rel in force) and not deleted_here(rel):
+                step("add", rel, "starter file, the project's from now on")
+                writes[rel] = (data, mode)
+            locked_value = "seeded"
+            steps.append({"action": "lock", "key": rel, "value": locked_value})
+        elif kind == "owned":
+            new = _decode(data)
+            text = _decode(cur) if cur is not None else None
+            if cur is not None and (text is None or new is None):
+                ok = cur == data or _blob_id(cur) in tpl.history.get(rel, []) or rel in force
+                step("current" if cur == data else ("update" if ok else "SKIP"), rel,
+                     "" if ok else "binary file edited here; --force %s overwrites it" % rel)
+            else:
+                ok = decide(rel, text, new, tpl.versions(rel))
+            if ok and cur != data:
+                writes[rel] = (data, mode)
+            if ok:
+                steps.append({"action": "lock", "key": rel, "value": _blob_id(data)})
+        elif kind == "split":
+            new_full = _decode(data)
+            headings = _claude_headings(tpl)
+            new_generic = _split_claude(new_full, headings)[0]
+            versions = [_split_claude(v, headings)[0] for v in tpl.versions(rel)]
+            text = _decode(cur) if cur is not None else None
+            if cur is not None and text is None:
+                step("SKIP", rel, "not UTF-8 text")
+                continue
+            generic, project = _split_claude(text, headings) if text is not None else (None, "")
+            if decide(rel, generic, new_generic, versions):
+                out = _join_claude(new_generic, project).encode("utf-8") if text is not None else data
+                if out != cur:
+                    if steps[-1]["action"] == "current":
+                        steps[-1]["action"] = "update"
+                        steps[-1]["note"] = "adds the project marker"
+                    writes[rel] = (out, mode)
+                if project.strip() and steps[-1]["action"] in ("update", "add"):
+                    steps[-1]["note"] = (steps[-1]["note"] + "; " if steps[-1]["note"] else "") + \
+                        "project part kept (%d lines)" % len(project.splitlines())
+                steps.append({"action": "lock", "key": rel, "value": _text_id(new_generic)})
+            elif steps[-1]["action"] == "SKIP":
+                steps[-1]["note"] = ("edited above the project part. To keep those lines, move them "
+                                     "into the project part and rerun; --force %s replaces only the "
+                                     "template part" % rel)
+        elif kind == "merged" and rel == SETTINGS_KEY:
+            new_value = _load_json(data)
+            project = _load_json(cur) if cur is not None else None
+            if cur is not None and project is None:
+                step("SKIP", rel, "not valid JSON; fix it by hand")
+                continue
+            if project is not None and not _hooks_usable(project):
+                step("SKIP", rel, "unusable hooks: `hooks` must be an object whose values are lists; "
+                     "fix it by hand")
+                continue
+            new_lines = _hook_lines(new_value)
+            versions = [_hook_lines(v) for v in (_load_json(t.encode("utf-8"))
+                                                 for t in tpl.versions(rel)) if v is not None]
+            if decide(rel, _hook_lines(project) if project is not None else None, new_lines, versions):
+                out = data if project is None else _dump_json(_merge_hooks(project, new_value))
+                if project is None or _merge_hooks(project, new_value) != project:
+                    if steps[-1]["action"] == "current":
+                        steps[-1]["action"] = "update"
+                        steps[-1]["note"] = "hook order"
+                    writes[rel] = (out, mode)
+                steps.append({"action": "lock", "key": rel, "value": _text_id(new_lines)})
+        elif kind == "merged" and rel == MCP_FILE:
+            new_servers = (_load_json(data) or {}).get("mcpServers") or {}
+            project = _load_json(cur) if cur is not None else None
+            if cur is not None and project is None:
+                step("SKIP", rel, "not valid JSON; fix it by hand")
+                continue
+            if project is not None and not isinstance(project.get("mcpServers", {}), dict):
+                step("SKIP", rel, "unusable mcpServers: it must be an object of servers; fix it by hand")
+                continue
+            servers = dict((project or {}).get("mcpServers") or {})
+            history = {}
+            for v in tpl.versions(rel):
+                for name, server in ((_load_json(v.encode("utf-8")) or {}).get("mcpServers") or {}).items():
+                    history.setdefault(name, []).append(_canon(server))
+            changed = False
+            for name in sorted(set(new_servers) | set(history)):
+                key = "%s:%s" % (MCP_FILE, name)
+                gone = name not in new_servers
+                have = _canon(servers[name]) if name in servers else None
+                if gone and have is None:
+                    continue
+                want = None if gone else _canon(new_servers[name])
+                if decide(key, have, want, history.get(name, []), removed_upstream=gone):
+                    if gone:
+                        del servers[name]
+                        changed = True
+                    else:
+                        if servers.get(name) != new_servers[name]:
+                            servers[name] = new_servers[name]
+                            changed = True
+                        steps.append({"action": "lock", "key": key, "value": _text_id(want)})
+            if changed:
+                out = data if project is None else _dump_json(dict(project, mcpServers=servers))
+                writes[rel] = (out, mode)
+
+    # Owned paths the template once shipped and has since dropped.
+    for rel in sorted(tpl.history):
+        if rel in tpl.files or _manifest_kind(tpl.manifest, rel) != "owned":
+            continue
+        cur = _read_bytes(os.path.join(root, rel))
+        if cur is None:
+            continue
+        pristine = _blob_id(cur) in tpl.history[rel] or _blob_id(cur) == locked.get(rel)
+        if pristine or rel in force:
+            step("remove", rel, "no longer in the template")
+            writes[rel] = None
+        else:
+            step("SKIP", rel, "no longer in the template, but edited here; --force %s removes it" % rel)
+
+    # A symlink inside the project can point a write at another folder.
+    real_root = os.path.realpath(root)
+    for rel in sorted(writes):
+        dest = os.path.realpath(os.path.join(root, rel))
+        if _inside(dest, real_root):
+            continue
+        del writes[rel]
+        steps[:] = [s for s in steps if s["key"] != rel and not s["key"].startswith(rel + ":")]
+        step("SKIP", rel, "resolves outside the project, to %s; upgrade writes only inside it" % dest)
+
+    # Keys the lock holds and nothing above decided keep their old value.
+    decided = {s["key"] for s in steps if s["action"] == "lock"}
+    files = {k: v for k, v in locked.items() if k not in decided and
+             not any(s["key"] == k and s["action"] == "remove" for s in steps)}
+    files.update({s["key"]: s["value"] for s in steps if s["action"] == "lock"})
+    return [s for s in steps if s["action"] != "lock"], writes, files
+
+
+def _apply_upgrade(root, tpl, writes, files):
+    """Stage every write first, then move each into place, so a failed write leaves the
+    project as it was instead of half upgraded."""
+    import shutil
+    import tempfile
+    lock_dest = os.path.realpath(os.path.join(root, TEMPLATE_LOCK_REL))
+    if not _inside(lock_dest, os.path.realpath(root)):
+        raise OSError("%s resolves outside the project, to %s" % (TEMPLATE_LOCK_REL, lock_dest))
+    stage = tempfile.mkdtemp(prefix=".viber-upgrade-", dir=root)
+    try:
+        staged = []
+        for n, (rel, item) in enumerate(sorted((k, v) for k, v in writes.items() if v is not None)):
+            data, mode = item
+            tmp = os.path.join(stage, str(n))
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.chmod(tmp, mode)
+            staged.append((tmp, rel))
+        # The lock is committed, often to a public repo, so it holds no local path.
+        lock = {"source": tpl.source, "date": now()[:19],
+                "files": dict(sorted(files.items()))}
+        tmp = os.path.join(stage, "lock")
+        with open(tmp, "wb") as fh:
+            fh.write(_dump_json(lock))
+        staged.append((tmp, TEMPLATE_LOCK_REL))
+        for tmp, rel in staged:
+            dest = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            os.replace(tmp, dest)
+        for rel in sorted(k for k, v in writes.items() if v is None):
+            os.remove(os.path.join(root, rel))
+            parent = os.path.dirname(os.path.join(root, rel))
+            while os.path.realpath(parent) != os.path.realpath(root) and not os.listdir(parent):
+                os.rmdir(parent)
+                parent = os.path.dirname(parent)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def _print_detail(d):
+    if d.get("own"):
+        print("      the project's own lines (not in the template):")
+        for l in d["own"]:
+            print("        + " + l)
+    if d.get("lost"):
+        print("      template lines the project removed:")
+        for l in d["lost"]:
+            print("        - " + l)
+    if d.get("show_diff") and d.get("nearest") is not None:
+        import difflib
+        diff = list(difflib.unified_diff(d["nearest"].splitlines(), d["cur"].splitlines(),
+                                         "template (nearest version)", "project", n=0, lineterm=""))
+        print("      diff against the nearest template version:")
+        shown = diff if d.get("full") else diff[:DIFF_LINES]
+        for l in shown:
+            print("        " + l)
+        if len(diff) > len(shown):
+            print("        ... %d more diff lines; --diff shows all" % (len(diff) - len(shown)))
+
+
+def _upgrade_target(target, tpl):
+    """None when `target` may be upgraded, else why not."""
+    if not os.path.isdir(target):
+        return "not a directory"
+    real = os.path.realpath(target)
+    if _inside(real, os.path.realpath(tpl.dir)) or real == os.path.realpath(tpl.checkout):
+        return "inside the viber checkout itself"
+    if os.path.isfile(os.path.join(target, ".viber", "bin", "viber")):
+        return None
+    if set(os.listdir(target)) <= {".git", ".DS_Store"}:
+        return None
+    return "no .viber/bin/viber here and the folder is not empty; upgrade only touches viber projects"
+
+
+def cmd_upgrade(args):
+    targets, force, apply, full, allow_dirty = [], set(), False, False, False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--apply":
+            apply = True
+        elif a == "--allow-dirty":
+            allow_dirty = True
+        elif a == "--diff":
+            full = True
+        elif a == "--force" and i + 1 < len(args):
+            force.add(args[i + 1].replace(os.sep, "/"))
+            i += 1
+        elif a.startswith("--"):
+            die("unknown option %s. Usage: viber upgrade <project>... [--apply] [--force <path>] [--diff] [--allow-dirty]" % a)
+        else:
+            targets.append(a)
+        i += 1
+    if not targets:
+        die("usage: viber upgrade <project>... [--apply] [--force <path>] [--diff] [--allow-dirty]\n"
+            "Run it with the CLI inside a viber checkout: python3 <viber>/template/.viber/bin/viber upgrade <project>")
+    tdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if os.path.basename(tdir) != "template" or not os.path.isfile(os.path.join(tdir, MANIFEST_REL)):
+        die("upgrade runs from a viber checkout: python3 <viber>/template/.viber/bin/viber upgrade <project>")
+    tpl = _Template(tdir)
+    if apply and tpl.source.endswith("+local") and not allow_dirty:
+        print("refused: the template in %s has uncommitted changes, so the stamp would read %s and "
+              "name no commit. Nobody could tell later which template the project holds. Commit the "
+              "template first, or pass --allow-dirty to apply it anyway." % (tpl.checkout, tpl.source))
+        return 1
+    rows, failed = [], 0
+    for target in targets:
+        root = os.path.abspath(os.path.expanduser(target))
+        print("== %s  (template %s%s)" % (root, tpl.source, "" if apply else ", dry run"))
+        why = _upgrade_target(root, tpl)
+        if why:
+            print("  refused: " + why + "\n")
+            rows.append((root, "refused"))
+            failed += 1
+            continue
+        steps, writes, files = _plan_upgrade(root, tpl, force)
+        counts = {}
+        for s in steps:
+            counts[s["action"]] = counts.get(s["action"], 0) + 1
+            if s["action"] == "current":
+                continue
+            print("  %-9s %s%s" % (s["action"], s["key"], ("  (%s)" % s["note"]) if s["note"] else ""))
+            if s["detail"]:
+                _print_detail(dict(s["detail"], show_diff=True, full=full))
+        print("  unchanged: %d" % counts.get("current", 0))
+        if not tpl.has_git:
+            print("  note: the checkout has no git history, so only the current template counts as "
+                  "unedited; older copies read as edited")
+        if apply:
+            try:
+                _apply_upgrade(root, tpl, writes, files)
+                print("  written: %d file(s), template.lock stamped %s" % (len(writes), tpl.source))
+            except OSError as e:
+                print("  FAILED while writing: %s. Files moved before the error stay; "
+                      "rerun after fixing it." % e)
+                failed += 1
+        print()
+        rows.append((root, counts))
+    if len(targets) > 1:
+        print("Summary")
+        print("  %-6s %-6s %-6s %-6s %-6s  %s" % ("add", "update", "remove", "skip", "kept", "project"))
+        for root, c in rows:
+            if c == "refused":
+                print("  %-34s  %s" % ("refused", root))
+                continue
+            print("  %-6d %-6d %-6d %-6d %-6d  %s" % (c.get("add", 0), c.get("update", 0),
+                  c.get("remove", 0), c.get("SKIP", 0), c.get("kept out", 0), root))
+    if not apply:
+        print("Dry run: nothing written. Add --apply to write; every SKIP stays untouched unless "
+              "you pass --force <path>.")
+    return 1 if failed else 0
+
+
+def _template_report():
+    """Doctor lines about the template stamp. Information only: drift never blocks."""
+    lock = _read_lock(ROOT)
+    if not lock:
+        return ["no .viber/template.lock: this project was installed by copy, so its template "
+                "version is unknown. `python3 <viber>/template/.viber/bin/viber upgrade <this dir>` "
+                "stamps it."]
+    out = ["version: %s (%s)" % (lock.get("source", "unknown"), day(lock.get("date", "")))]
+    ids = _installed_ids(ROOT)
+    edited = sorted(k for k, v in lock["files"].items()
+                    if v != "seeded" and k in ids and ids[k] != v)
+    missing = sorted(k for k, v in lock["files"].items() if v != "seeded" and k not in ids)
+    if "CLAUDE.md" in missing and os.path.isfile(os.path.join(ROOT, "CLAUDE.md")):
+        missing.remove("CLAUDE.md")
+        out.append("CLAUDE.md has lost its marker line `%s`. Put it back above the project "
+                   "rules; without it the next upgrade splits the file at the first section the "
+                   "template never had." % PROJECT_MARKER)
+    if edited:
+        out.append("edited since the stamp: %s. The next upgrade skips them; move local rules "
+                   "below the CLAUDE.md marker or into the template." % ", ".join(edited))
+    if missing:
+        out.append("removed since the stamp, kept out by upgrade: " + ", ".join(missing))
+    out.append("newer template: git -C <viber> pull, then python3 "
+               "<viber>/template/.viber/bin/viber upgrade %s" % ROOT)
+    return out
+
+
+def cmd_version(_args):
+    lock = _read_lock(ROOT)
+    if not lock:
+        print("unstamped (installed by copy; run upgrade from a viber checkout to stamp it)")
+        return 0
+    print("%s  %s" % (lock.get("source", "unknown"), lock.get("date", "")))
     return 0
 
 
@@ -3630,7 +4422,7 @@ COMMANDS = {"new": cmd_new, "set": cmd_set, "list": cmd_list, "show": cmd_show,
             "doctor": cmd_doctor,
             "trigger": cmd_trigger, "lessons": cmd_lessons, "finding": cmd_finding,
             "truth": cmd_truth, "graph": cmd_graph, "guard": cmd_guard,
-            "recompact": cmd_recompact}
+            "recompact": cmd_recompact, "upgrade": cmd_upgrade, "version": cmd_version}
 
 
 def main():

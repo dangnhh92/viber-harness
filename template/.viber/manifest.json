@@ -1,0 +1,20 @@
+{
+  "split": ["CLAUDE.md"],
+  "merged": [".claude/settings.json", ".mcp.json"],
+  "seeded": [
+    ".gitignore",
+    "src/",
+    ".viber/docs/TRUTH.md",
+    ".viber/docs/.gitkeep",
+    ".viber/memory/",
+    ".claude/agents/.gitkeep"
+  ],
+  "owned": [
+    "AGENTS.md",
+    ".viber/bin/viber",
+    ".viber/manifest.json",
+    ".viber/docs/rules/",
+    ".claude/agents/",
+    ".claude/skills/"
+  ]
+}

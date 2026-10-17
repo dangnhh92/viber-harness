@@ -14,6 +14,7 @@ Read the file named here before the work it covers. Its rules bind as if written
 | `.viber/docs/rules/review-gate.md` | before dispatching work that ends in a `feat`, `fix` or `refactor` commit, before accepting any handoff, and before any such commit |
 | `.claude/skills/device-testing` | before writing or running any UI test, capture or walkthrough on a real phone, simulator, emulator or browser; name it in the plan for `runner` |
 | `.claude/skills/iap-entitlement` | before building, changing, reviewing or briefing code that sells, grants, restores or revokes a purchase or subscription |
+| `.claude/skills/writing-copy` | before writing published prose: blog posts, store or marketing copy, app descriptions |
 
 ## 1. Roles
 
@@ -49,7 +50,7 @@ No fixed pipeline: reality inserts corrections between any two steps. Run one lo
 
 Two decisions. **The agent is the kind of work**: its scope, what it must not do, how it reports. **The model is chosen per spawn**, by you. A definition's `model:` is only a floor: a spawn where you chose nothing runs on it instead of your own, pricier model. Aliases pick up new releases on their own.
 
-**Effort is chosen per spawn too**, with the Agent tool's `effort` parameter (a relayed session takes `--effort`). The floor is `medium`; never `low`.
+**Effort is chosen per spawn too**, with the Agent tool's `effort` parameter. The floor is `medium`; never `low`.
 
 - `medium`: the approach is decided and someone checks the result (the review gate, a test, you looking at every artifact). Most work.
 - `high`: the result is trusted without re-checking (a root cause, a design, a migration, a money or auth judgement), or edge cases are likely.
@@ -105,6 +106,10 @@ Name the chosen model and a one-line reason in the spawn, so a wrong call is vis
 - **To recall, grep `.viber/memory/index.md` first.** Never hand-edit `state.md` or `index.md`; they are generated.
 - **Never park a "do X once Y happens" as a prose note** in a doc, comment or record body. Open a record whose title is the condition, so `check` raises it every turn.
 - `.viber/docs/TRUTH.md` is what is true now, every claim anchored; records hold why, what is open, and what happened. Plans under `.viber/docs/` are optional; when code contradicts one, say so and ask which is right. Mechanics: `.viber/docs/rules/truth.md`.
+
+### Compact instructions
+
+When compacting, write every number, test result, count and run state with its source and time (file, log or command, "seen 11:14"). Keep each row of a results table, never only the totals. Anything you cannot tie to a source is written as "not checked", never as fact.
 
 ## 5. Reporting back
 
@@ -183,3 +188,5 @@ Never delete code you have not read. Never modify a file you do not understand.
 - Conventional commits (`feat` `fix` `refactor` `chore` `docs`), one complete logical unit each, message says why.
 - **Never commit secrets, `.env`, or credentials.** When `check` reports a line that looks like a live one, report it to the owner and stop. Do not delete, rewrite or unstage it yourself: sometimes it is deliberate. Once they decide to keep it, committing settles it.
 - Commit when work is done without being asked twice, and push to a remote only the owner can read. **Anything anyone else can see needs a yes first**: public repo, deploy, release, store submission.
+
+<!-- viber: project rules go below this line; upgrade keeps them -->

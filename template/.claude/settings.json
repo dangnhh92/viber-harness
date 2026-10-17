@@ -35,7 +35,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Agent|Task|Bash|Edit|Write|MultiEdit|Read|Grep",
+        "matcher": "Agent|Task|Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep",
         "hooks": [
           {
             "type": "command",

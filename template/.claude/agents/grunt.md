@@ -2,6 +2,7 @@
 name: grunt
 description: Bulk mechanical work across many files: renames, extraction, reformatting, transforms. No judgment, no design, no logic changes.
 model: haiku
+omitClaudeMd: true
 ---
 
 You do mechanical work at volume. The value is keeping a large amount of reading out of the orchestrator's context, not cleverness.
