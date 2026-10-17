@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "agent-device": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "agent-device@0.21.28", "mcp"],
+      "env": { "AGENT_DEVICE_NO_UPDATE_NOTIFIER": "1" }
+    }
+  }
+}

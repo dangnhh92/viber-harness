@@ -12,6 +12,8 @@ Read the file named here before the work it covers. Its rules bind as if written
 | `.viber/docs/rules/truth.md` | before editing `.viber/docs/TRUTH.md` or a plan, and when `truth check` reports anything |
 | `.viber/docs/rules/learning.md` | when `check` raises a signal, before writing a lesson, or when a remedy is on the table |
 | `.viber/docs/rules/review-gate.md` | before dispatching work that ends in a `feat`, `fix` or `refactor` commit, before accepting any handoff, and before any such commit |
+| `.claude/skills/device-testing` | before writing or running any UI test, capture or walkthrough on a real phone, simulator, emulator or browser; name it in the plan for `runner` |
+| `.claude/skills/iap-entitlement` | before building, changing, reviewing or briefing code that sells, grants, restores or revokes a purchase or subscription |
 
 ## 1. Roles
 

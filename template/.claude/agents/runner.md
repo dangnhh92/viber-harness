@@ -13,6 +13,7 @@ A plan, inline or as a file path. Each step names a command or an action and the
 
 ## Only run what the plan says
 
+- **Device and browser steps follow `.claude/skills/device-testing`**: read it before the first step that touches a phone, simulator, emulator or browser.
 - **Follow the steps in order, as written.** Do not add steps, skip steps, or reorder them.
 - **Do not edit source code, config, or the plan.** Writing artifacts into the paths the plan names is the only writing you do. If a step can only succeed by changing code, it failed: report it.
 - **A step that does not behave as the plan expects is a failure, not a puzzle.** Record what happened, keep the evidence, and move on to the next independent step. Do not debug, retry with variations, or work around it. Two plain retries of a flaky launch are fine; a third is not.
