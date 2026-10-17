@@ -49,7 +49,7 @@ Everything lives in `template/`. `viber upgrade` puts it into your project and k
 | Rules | `CLAUDE.md` | The orchestrator's contract, kept short: roles, the work loop, routing table, reporting, git rules, and a "Read on demand" table naming which rules file or skill to read before which kind of work. Your own rules go below its last line, the marker. `AGENTS.md` points at it so other tools read the same file. |
 | Rules on demand | `.viber/docs/rules/*.md` | The detail CLAUDE.md points at, read only when that work comes up: `memory.md` (record CLI and rules), `truth.md` (TRUTH.md and plans), `learning.md` (signals, lessons, remedies), `review-gate.md` (accepting a handoff, the review gate). Each binds as if written in CLAUDE.md. |
 | Agents | `.claude/agents/*.md` | Six definitions, one per kind of work, each with a default model: `analyst` (opus), `builder` (opus), `coder` (sonnet), `grunt` (haiku), `reviewer` (sonnet), `runner` (haiku, executes a written test or capture plan and returns artifacts, never a verdict). |
-| Hooks | `.claude/settings.json` | `SessionStart` loads memory into context and, after a compaction, lists the rules files to read again; `UserPromptSubmit` reloads memory and lists what is hanging; `PreToolUse` runs the guard on every spawn, command and edit. |
+| Hooks | `.claude/settings.json` | `SessionStart` loads memory into context and, after a compaction, lists the rules files to read again and the newest saved agent reports; `SubagentStop` saves each agent's final report to `.viber/handoffs/` (never committed, kept 30 days, at most 200); `UserPromptSubmit` reloads memory and lists what is hanging; `PreToolUse` runs the guard on every spawn, command and edit. |
 | Skills | `.claude/skills/` | Rule sets that load only when the work matches. See "Skills that ship with viber". |
 | Device server | `.mcp.json` | Declares `agent-device` (pinned) so agents can drive a phone, simulator or emulator. For mobile work only: delete the file if you do not build apps. |
 | CLI | `.viber/bin/viber` | One Python file the orchestrator runs: records, facts, lessons, findings, signals, truth check, code graph, guard, health report, upgrade. |
@@ -233,7 +233,8 @@ viber lessons --for <role> [--tags a,b] [--limit 5]
 viber truth check | surface | gaps | confirm
 viber graph build | deps <R-042|doc:NAME.md|path::SYMBOL> | orphans
 viber check      (runs on every prompt)
-viber guard | recompact   (hooks run these)
+viber guard | recompact | handoff   (hooks run these)
+viber compactions [--last N]   (by hand: how many summary lines with a number name their source)
 viber doctor
 viber version
 viber upgrade <project>... [--apply] [--force <path>] [--diff] [--allow-dirty]   (run from the viber checkout)

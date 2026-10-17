@@ -22,6 +22,7 @@ Judge the harness by what actually happened, against its own rules. The audit re
 | Session transcripts | `~/.claude/projects/<encoded project path>/<session>.jsonl`, subagents in `<session>/subagents/agent-*.jsonl` | every tool call, its input and result size, usage per call, who started each turn |
 | Hook results | transcript lines `type: attachment` with `attachment.type` `hook_success`, `hook_additional_context` or `hook_cancelled`, carrying `hookName`, `exitCode`, `durationMs`, `command`, `stdout` | whether each hook fired, failed or ran slow, and what it injected |
 | Compactions | transcript `type: system`, `subtype: compact_boundary`, with `preTokens` and `postTokens` | context size at each compaction |
+| Summary sources | `python3 .viber/bin/viber compactions [--last N]` | per summary, how many lines with a number name a path, command or agent id |
 | Token report | `python3 .claude/skills/harness-audit/tokens.py --since <date> [--project x] [--session id] [--json]`, run from the project root | cost per project and session, main against subagents, what starts each turn, re-reads, large tool results, cache rebuilds, compactions |
 | Spawn log | `.viber/memory/.spawns.jsonl` (`agent`, `model`, `effort`, `refused`) | the agent, model and effort of each spawn |
 | Records | `.viber/memory/index.md`, the records dir, `viber doctor`, `viber check` | open signals, findings and repeats, stale titles, decisions |
@@ -39,6 +40,7 @@ Run the sections the question needs. For "is everything ok", run all five.
 - Every hook in `.claude/settings.json` shows up in transcripts since that file last changed. Look for a non-zero `exitCode`, `hook_cancelled`, and `durationMs` over 2000 (a slow hook taxes every prompt).
 - `viber doctor` in each active project: dead hooks, agents without `model:`, a viber binary behind the release it was installed from.
 - After each `compact_boundary`, the recompact hook fired, and the guard injected each on-demand rules file at its trigger.
+- Each finished agent left a file in `.viber/handoffs/`, and the recompact output named the newest.
 
 **2. Did the work follow the rules?**
 - Every `feat`, `fix` or `refactor` commit that touches code has a `reviewer` spawn before it in that project's transcripts (`.viber/docs/rules/review-gate.md`).

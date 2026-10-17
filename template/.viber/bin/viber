@@ -17,6 +17,8 @@ state.md and index.md are generated; never hand-edit them.
   viber lessons --for <role> [--tags a,b] [--limit 5]   ranked, capped lesson recall
   viber guard          PreToolUse hook: refuse bare spawns, nudge, re-inject rules files (reads stdin)
   viber recompact      SessionStart(compact) hook: list the files CLAUDE.md says to read on demand
+  viber handoff        SubagentStop hook: save each agent's final report under .viber/handoffs/ (reads stdin)
+  viber compactions [--last 10] [--dir PATH]   how many summary lines with a number name their source
   viber doctor         plain language health report: is this project being run properly
   viber init           scaffold the layout in the current directory
   viber upgrade <project>... [--apply] [--force <path>] [--diff] [--allow-dirty]
@@ -304,7 +306,22 @@ def _whole_value(lines, i, sym, src):
     return value
 
 
-def gen_state():
+# A record shown as current every prompt reads as fact however old it is: an open
+# record mirroring work that had finished a day earlier was quoted to the owner as
+# still blocked (2026-10-17). The age goes on the printed lines only, so state.md
+# does not change every day while nobody touches a record.
+STALE_DAYS = 1
+
+
+def _age_tail(r):
+    try:
+        days = (datetime.now() - datetime.fromisoformat(str(r.get("updated", ""))[:26])).days
+    except (ValueError, TypeError):  # TypeError: an "updated" with a UTC offset
+        return ""
+    return f"  (last touched {days}d ago)" if days >= STALE_DAYS else ""
+
+
+def gen_state(aged=False):
     recs = all_records()
     # A dropped fact is a retired one. Rendering it anyway put a permanent STALE line at
     # the top of every session for a record its author had already closed.
@@ -325,6 +342,9 @@ def gen_state():
     def line(r):
         return f"  {r.get('id')}  {r.get('title', '')}"
 
+    def work_line(r):
+        return line(r) + (_age_tail(r) if aged else "")
+
     out = ["# State (generated, do not edit)", ""]
     out.append("Open: {n}  (doing {d} - blocked {b} - todo {o})".format(
         n=len(work), d=len(by["doing"]), b=len(by["blocked"]), o=len(by["open"])))
@@ -337,12 +357,12 @@ def gen_state():
             out.append(f"  {label}: {val}{tail}")
         out.append("")
     if by["doing"]:
-        out += ["Doing:"] + [line(r) for r in by["doing"]] + [""]
+        out += ["Doing:"] + [work_line(r) for r in by["doing"]] + [""]
     if by["blocked"]:
-        out += ["Blocked:"] + [line(r) for r in by["blocked"]] + [""]
+        out += ["Blocked:"] + [work_line(r) for r in by["blocked"]] + [""]
     nxt = by["open"][:3]
     if nxt:
-        out += ["Next up (most recently touched):"] + [line(r) for r in nxt]
+        out += ["Next up (most recently touched):"] + [work_line(r) for r in nxt]
         if len(by["open"]) > 3:
             out += [f"  ... and {len(by['open']) - 3} more"]
         out += [""]
@@ -367,6 +387,8 @@ def gen_state():
             out += [f"  ... and {len(faults) - 5} more, run `viber doctor`"]
         out += [""]
     body = "\n".join(out)
+    if aged:
+        return body
     os.makedirs(MEM, exist_ok=True)
     with open(os.path.join(MEM, "state.md"), "w", encoding="utf-8") as fh:
         fh.write(body)
@@ -1505,7 +1527,7 @@ def cmd_state(_args):
     # look wrong, run viber state". Regenerating only state.md left the one fault it was
     # prescribed for, a stale index.md, alive after being told to run it.
     regen()
-    print(gen_state())
+    print(gen_state(aged=True))
 
 
 def cmd_index(_args):
@@ -3689,18 +3711,186 @@ def _read_hook_payload():
         return {}
 
 
+# An agent's report lived only in the orchestrator's context, so a row the compaction
+# summary dropped had nothing left to re-read (2026-10-16, a results row). Reports are
+# kept on disk, bounded by age and count, and never committed.
+HANDOFFS = os.path.join(ROOT, ".viber", "handoffs")
+HANDOFF_KEEP_DAYS = 30
+HANDOFF_KEEP_FILES = 200
+HANDOFF_MAX_CHARS = 100_000
+
+
+def _prune_handoffs():
+    cutoff = datetime.now().timestamp() - HANDOFF_KEEP_DAYS * 86400
+    names = sorted((n for n in os.listdir(HANDOFFS) if n.endswith(".md")), reverse=True)
+    for i, name in enumerate(names):
+        path = os.path.join(HANDOFFS, name)
+        try:
+            if i >= HANDOFF_KEEP_FILES or os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def cmd_handoff(_args):
+    """SubagentStop and PostToolUse(SubagentHandback) hook. Prints nothing, so it costs no
+    context, and always exits 0: an exit 2 on SubagentStop would keep the subagent running."""
+    try:
+        ev = _read_hook_payload()
+        agent = ev.get("agent_type") or ""
+        handback = ev.get("hook_event_name") == "PostToolUse"
+        text = ((ev.get("tool_input") or {}).get("message") if handback
+                else ev.get("last_assistant_message")) or ""
+        # An empty agent_type is one of Claude Code's own internal agents (prompt
+        # suggestions, /btw), not work anyone handed off.
+        if not agent or not text.strip():
+            return 0
+        aid = re.sub(r"[^A-Za-z0-9]", "", ev.get("agent_id") or "")[:32] or "noid"
+        os.makedirs(HANDOFFS, exist_ok=True)
+        ignore = os.path.join(HANDOFFS, ".gitignore")
+        if not os.path.exists(ignore):
+            with open(ignore, "w", encoding="utf-8") as fh:
+                fh.write("*\n")
+        # A SubagentHandback report arrives just before the SubagentStop, whose message is
+        # only the closing text. A later stop of the same agent (it was sent more work) is
+        # a new report and is kept.
+        if not handback and aid != "noid":
+            recent = datetime.now().timestamp() - 300
+            for name in os.listdir(HANDOFFS):
+                if name.endswith(f"-{aid}-handback.md") and \
+                        os.path.getmtime(os.path.join(HANDOFFS, name)) > recent:
+                    return 0
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        kind = re.sub(r"[^A-Za-z0-9_-]", "-", agent)[:40]
+        path = os.path.join(HANDOFFS, f"{stamp}-{kind}-{aid}" + ("-handback" if handback else "") + ".md")
+        if len(text) > HANDOFF_MAX_CHARS:
+            text = text[:HANDOFF_MAX_CHARS] + f"\n\n[cut at {HANDOFF_MAX_CHARS} chars, the rest is in the transcript]\n"
+        head = (f"agent: {agent}\nagent_id: {ev.get('agent_id', '')}\nsaved: {now()}\n"
+                f"transcript: {ev.get('agent_transcript_path') or ev.get('transcript_path') or ''}\n\n")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(head + text)
+        _prune_handoffs()
+    except Exception:
+        pass
+    return 0
+
+
+def _recent_handoffs(limit=5):
+    try:
+        names = sorted((n for n in os.listdir(HANDOFFS) if n.endswith(".md")), reverse=True)[:limit]
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        scope = ""
+        try:
+            with open(os.path.join(HANDOFFS, name), encoding="utf-8", errors="replace") as fh:
+                m = re.search(r"^\s*scope:\s*(.+)$", fh.read(HANDOFF_MAX_CHARS + 2000), re.M)
+            scope = m.group(1).strip()[:90] if m else ""
+        except OSError:
+            pass
+        out.append(f"- `.viber/handoffs/{name}`" + (f"  {scope}" if scope else ""))
+    return out
+
+
 def cmd_recompact(_args):
     rows = read_on_demand_rows()
-    if not rows:
+    reports = _recent_handoffs()
+    if not rows and not reports:
         return 0
     # A summary is the model's own memory, written without its sources; numbers in it
     # were repeated as fact after compactions (2026-10-16, a dropped results row).
     print("The summary above is memory, not evidence. Before repeating any number, "
           "test result or state from it, re-read its source.\n")
-    print("Compaction dropped these files from your context; each binds again at its trigger.\n")
-    print("| Read | When |\n|---|---|")
-    for _cell, line in rows:
-        print(line)
+    if reports:
+        print("Agent reports saved on disk, newest first; the file name carries the agent id "
+              "(all of them: `ls .viber/handoffs`):\n")
+        print("\n".join(reports) + "\n")
+    if rows:
+        print("Compaction dropped these files from your context; each binds again at its trigger.\n")
+        print("| Read | When |\n|---|---|")
+        for _cell, line in rows:
+            print(line)
+    return 0
+
+
+# Opt-in measure of the summaries Claude Code writes at compaction: run by hand, never
+# by a hook. A source is a path, a backticked command or an agent id, the things the
+# Compact instructions ask for; the count says whether those instructions are followed.
+# A bare "a/b" is not a path: "12/12 passed" and "and/or" would count as sources. Without
+# a known extension, a path starts with "/", "~/" or "./", is a dot directory
+# (".viber/x"), or has a first segment that is not only digits plus a second "/".
+_SEG = r"(?!\d+(?![\w.-]))[\w.-]+"
+_SRC_RE = re.compile(r"`[^`]+`|\b[\w-]+\.(?:md|py|json|jsonl|log|txt|sh|ts|tsx|js|swift|dart|kt|ya?ml)\b"
+                     r"|(?<![\w/.])(?:~|\.{1,2})?/" + _SEG + r"/[\w.-]+"
+                     r"|(?<![\w/.-])\.[\w-]+/[\w.-]+"
+                     r"|(?<![\w/.-])" + _SEG + r"/[\w.-]+/"
+                     r"|\ba[0-9a-f]{15,}\b")
+
+
+def cmd_compactions(args):
+    last, tdir = 10, None
+    it = iter(args)
+    for a in it:
+        if a == "--last":
+            try:
+                last = max(1, int(next(it, "10")))
+            except ValueError:
+                die("--last takes a number")
+        elif a == "--dir":
+            tdir = next(it, None)
+        else:
+            die(f"unknown argument '{a}'. Usage: viber compactions [--last N] [--dir PATH]")
+    if not tdir:
+        base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        tdir = os.path.join(base, "projects", re.sub(r"[^A-Za-z0-9]", "-", ROOT))
+    try:
+        files = sorted((os.path.join(tdir, n) for n in os.listdir(tdir) if n.endswith(".jsonl")),
+                       key=os.path.getmtime, reverse=True)
+    except OSError:
+        print(f"no transcripts at {tdir}; pass --dir")
+        return 0
+    rows = []
+    for path in files:
+        meta, found = None, []
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                if "compact_boundary" not in raw and "isCompactSummary" not in raw:
+                    continue
+                try:
+                    d = json.loads(raw)
+                except ValueError:
+                    continue
+                if d.get("isSidechain"):
+                    continue
+                if d.get("subtype") == "compact_boundary":
+                    meta = d.get("compactMetadata") or {}
+                elif d.get("isCompactSummary"):
+                    c = (d.get("message") or {}).get("content")
+                    text = c if isinstance(c, str) else "".join(
+                        x.get("text", "") for x in (c or []) if isinstance(x, dict))
+                    found.append((d.get("timestamp", ""), meta or {}, text.split("Summary:", 1)[-1]))
+                    meta = None
+        rows = found + rows
+        if len(rows) >= last:
+            break
+    rows = sorted(rows, key=lambda r: r[0])[-last:]
+    if not rows:
+        print(f"no compactions in {tdir}")
+        return 0
+    tot_n = tot_s = 0
+    for ts, meta, body in rows:
+        nums = [x for x in body.splitlines() if re.search(r"\d", x)]
+        src = [x for x in nums if _SRC_RE.search(x)]
+        tot_n, tot_s = tot_n + len(nums), tot_s + len(src)
+        pre, post = meta.get("preTokens"), meta.get("postTokens")
+        size = f"{pre // 1000}k->{post // 1000}k" if isinstance(pre, int) and isinstance(post, int) else "?"
+        share = f"{len(src) / len(nums):.0%}" if nums else "-"
+        print(f"{ts[:16]}  {meta.get('trigger', '?'):6}  {size:12}  summary {len(body):6} chars  "
+              f"number lines {len(nums):4}, with a source {len(src):4} ({share}), "
+              f"handoff refs {body.count('.viber/handoffs')}")
+    if tot_n:
+        print(f"\n{len(rows)} summaries: {tot_s} of {tot_n} number lines name a source ({tot_s / tot_n:.0%})")
     return 0
 
 
@@ -4422,7 +4612,8 @@ COMMANDS = {"new": cmd_new, "set": cmd_set, "list": cmd_list, "show": cmd_show,
             "doctor": cmd_doctor,
             "trigger": cmd_trigger, "lessons": cmd_lessons, "finding": cmd_finding,
             "truth": cmd_truth, "graph": cmd_graph, "guard": cmd_guard,
-            "recompact": cmd_recompact, "upgrade": cmd_upgrade, "version": cmd_version}
+            "recompact": cmd_recompact, "handoff": cmd_handoff, "compactions": cmd_compactions,
+            "upgrade": cmd_upgrade, "version": cmd_version}
 
 
 def main():

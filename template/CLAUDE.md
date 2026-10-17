@@ -109,7 +109,7 @@ Name the chosen model and a one-line reason in the spawn, so a wrong call is vis
 
 ### Compact instructions
 
-When compacting, write every number, test result, count and run state with its source and time (file, log or command, "seen 11:14"). Keep each row of a results table, never only the totals. Anything you cannot tie to a source is written as "not checked", never as fact.
+CLAUDE.md, memory and hook output come back by themselves after a compaction: do not restate their rules. For every number, test row or run state you keep, name its source: the agent id whose report gave it (each report is saved as `.viber/handoffs/*-<agent id>.md`), or the file or command. Keep result tables whole. A number with no source is written "not checked".
 
 ## 5. Reporting back
 

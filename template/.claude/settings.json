@@ -43,6 +43,27 @@
           }
         ]
       }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/.viber/bin/viber\" handoff"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "SubagentHandback",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/.viber/bin/viber\" handoff"
+          }
+        ]
+      }
     ]
   }
 }
