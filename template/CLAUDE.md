@@ -9,7 +9,7 @@ Read the file named here before the work it covers. Its rules bind as if written
 | Read | When |
 |---|---|
 | `.viber/docs/rules/memory.md` | before any `viber new`, `set`, `fact`, or recalling a record |
-| `.viber/docs/rules/truth.md` | before editing `.viber/docs/TRUTH.md` or a plan, and when `truth check` reports anything |
+| `.viber/docs/rules/truth.md` | before editing a plan |
 | `.viber/docs/rules/learning.md` | when `check` raises a signal, before writing a lesson, or when a remedy is on the table |
 | `.viber/docs/rules/review-gate.md` | before dispatching work that ends in a `feat`, `fix` or `refactor` commit, before accepting any handoff, and before any such commit |
 | `.claude/skills/device-testing` | before writing or running any UI test, capture or walkthrough on a real phone, simulator, emulator or browser; name it in the plan for `runner` |
@@ -105,7 +105,7 @@ Name the chosen model and a one-line reason in the spawn, so a wrong call is vis
 - **A record's numbers are a dated observation.** Re-measure before briefing from one.
 - **To recall, grep `.viber/memory/index.md` first.** Never hand-edit `state.md` or `index.md`; they are generated.
 - **Never park a "do X once Y happens" as a prose note** in a doc, comment or record body. Open a record whose title is the condition, so `check` raises it every turn.
-- `.viber/docs/TRUTH.md` is what is true now, every claim anchored; records hold why, what is open, and what happened. Plans under `.viber/docs/` are optional; when code contradicts one, say so and ask which is right. Mechanics: `.viber/docs/rules/truth.md`.
+- The truth snapshot is generated from `fact` pointers (the Facts block in `viber state`); records hold why, intent, and lessons. Plans under `.viber/docs/` are optional; when code contradicts one, say so and ask which is right. Mechanics: `.viber/docs/rules/truth.md`.
 
 ### Compact instructions
 
@@ -137,7 +137,7 @@ The framework stops repeating mistakes without the owner remembering. Signals (r
 
 ## 7. Handoffs and audit
 
-Every agent closes with a `HANDOFF:` block against your criteria. The agent reports; you judge. Re-verify the two or three riskiest "met" claims yourself. Reject a missing block or unanswered criterion. "Could not verify" is an answer; "done" without evidence is not. A handoff you accept is one you own. Run `viber truth check` as part of accepting.
+Every agent closes with a `HANDOFF:` block against your criteria. The agent reports; you judge. Re-verify the two or three riskiest "met" claims yourself. Reject a missing block or unanswered criterion. "Could not verify" is an answer; "done" without evidence is not. A handoff you accept is one you own.
 
 **No silent gaps.** A handoff without an `open:` line, or one that omits a gap the agent wrote into code or a record, goes back. Never call work done while a known gap in it is unlisted, and never close a task whose own notes defer a step: that step becomes its own record first.
 
@@ -176,7 +176,6 @@ Before changing code, delegated or not:
 3. Get confirmation when the change is destructive or wide.
 4. Edit.
 5. Verify: type check, test, or run it.
-6. Run `viber truth surface` and reconcile every claim it names in this same change.
 
 Never delete code you have not read. Never modify a file you do not understand.
 

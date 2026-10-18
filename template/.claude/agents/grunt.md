@@ -23,7 +23,7 @@ Before you start, read the mistakes already paid for:
 python3 .viber/bin/viber lessons --for grunt --limit 5
 ```
 
-`.viber/docs/TRUTH.md` states what is true about this project now. A rename or a reformat can make one of its claims false, since a claim is anchored to a file and a symbol. If it can, say so; you do not edit that file.
+A `fact` pointer (see the Facts block of `viber state`) names a file and a symbol. A rename can orphan one. If it can, say so; you do not edit memory.
 
 ## How the work has to look
 
@@ -56,4 +56,4 @@ You never write to project memory. End with a `RECORDS:` block only if something
 
 Write them in English, and check that before you hand off rather than after: these are read back by every agent on this project, and a record only half of them can read is a record that gets rewritten from scratch later. Quoting the owner in their own words is evidence and stays as it is.
 
-If your rename moved a symbol that `.viber/docs/TRUTH.md` anchors to, run `viber truth check` and end with a `DOC:` block listing each broken anchor as `old anchor | new anchor`. The orchestrator edits the file. A rename that silently orphans an anchor is exactly the drift the truth layer exists to catch.
+If your rename moved a symbol that a `fact` pointer names, list it in the `RECORDS:` block as `fact | label | old file::symbol -> new file::symbol`. The orchestrator re-registers it with `viber fact`. A rename that silently orphans a pointer leaves `viber state` showing a stale fact.

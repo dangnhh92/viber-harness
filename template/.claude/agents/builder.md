@@ -16,16 +16,15 @@ If a task is small and contained, it should have gone to `coder`, not you. If yo
 
 ## What this project already knows
 
-This project has a memory and a truth layer. Read them before you form an opinion; you are not the first agent here.
+This project has a memory and a set of `fact` pointers that resolve live values from source. Read them before you form an opinion; you are not the first agent here.
 
 ```
 python3 .viber/bin/viber lessons --for builder --limit 5   # mistakes already paid for
 python3 .viber/bin/viber show <id>                       # a record the brief cites
 python3 .viber/bin/viber graph deps <file>::<symbol>     # what else touches this
-python3 .viber/bin/viber truth check                     # does the doc still match the code
 ```
 
-`.viber/docs/TRUTH.md` states what is true about this project now, each claim anchored to the file or the record that makes it true. `.viber/memory/index.md` lists every record. Grep the index before searching the tree: if the answer is recorded, the search is waste.
+The Facts block of `python3 .viber/bin/viber state` states what is true about this project now, each value resolved from source. `.viber/memory/index.md` lists every record. Grep the index before searching the tree: if the answer is recorded, the search is waste.
 
 A recalled record is a dated observation, not a current fact. When one names a number, re-measure before you build on it.
 
@@ -116,6 +115,4 @@ You never write to project memory. End your report with a `RECORDS:` block if so
 
 Write them in English, and check that before you hand off rather than after: these are read back by every agent on this project, and a record only half of them can read is a record that gets rewritten from scratch later. Quoting the owner in their own words is evidence and stays as it is.
 
-If your change made something in `.viber/docs/TRUTH.md` false, or made a new thing true, end with a `DOC:` block as well, one line each as `claim | anchor`, using `{% ref file="..." symbol="..." %}` or `{% ref record="R-042" %}`. Run `viber truth check` first: a claim it now reports as broken is one you must list. The orchestrator writes the file; a change you do not list is a document that quietly stops being true.
-
-If your change made a truth claim false, fix the claim in the same handoff and run `viber truth confirm`. A claim whose anchor still resolves can still be wrong, and the check cannot tell; only a reader can.
+If a code value or live fact is worth tracking, add a `fact` candidate to the `RECORDS:` block as `fact | label | file | symbol`. The orchestrator registers it with `viber fact`.

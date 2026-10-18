@@ -4,7 +4,6 @@
   "seeded": [
     ".gitignore",
     "src/",
-    ".viber/docs/TRUTH.md",
     ".viber/docs/.gitkeep",
     ".viber/memory/",
     ".claude/agents/.gitkeep"

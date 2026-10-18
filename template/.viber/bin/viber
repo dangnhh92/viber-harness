@@ -38,6 +38,9 @@ import sys
 from datetime import date, datetime
 
 TYPES = ["decision", "task", "issue", "lesson", "milestone", "question", "fact"]
+# Only these types are a backlog. Decisions, lessons and facts are knowledge, and
+# milestones are a log: none of them is work somebody still has to do.
+WORK = {"task", "issue", "question"}
 STATUSES = ["open", "doing", "blocked", "done", "dropped"]
 LIVE = ["open", "doing", "blocked"]
 # Body lines recall prints. The cap keeps injected context small, but a line that does
@@ -326,7 +329,7 @@ def gen_state(aged=False):
     # A dropped fact is a retired one. Rendering it anyway put a permanent STALE line at
     # the top of every session for a record its author had already closed.
     facts = [r for r in recs if r.get("type") == "fact" and r.get("status") != "dropped"]
-    live = [r for r in recs if r.get("status") in LIVE and r.get("type") != "fact"]
+    live = [r for r in recs if r.get("status") in LIVE and r.get("type") in WORK]
 
     def is_signal(r):
         t = tags_of(r)
@@ -1136,39 +1139,6 @@ def cmd_check(_args):
     if stale:
         notes.append(f"{len(stale)} record(s) left in progress from an earlier day: "
                      + ", ".join(f"{r.get('id')} {r.get('title', '')}" for r in stale[:5]))
-    claims = truth_claims()
-    if claims:
-        broken = [c for c in claims
-                  if any(not resolve_ref(r)[0] for r in c["refs"])]
-        loose = [c for c in claims if not c["refs"]]
-        if broken or loose:
-            parts = []
-            if broken:
-                parts.append(f"{len(broken)} claim(s) whose anchor no longer resolves, "
-                             f"so the code moved and the document did not")
-            if loose:
-                parts.append(f"{len(loose)} claim(s) with no anchor, "
-                             f"so nothing can ever tell you when they go false")
-            notes.append("TRUTH.md: " + "; ".join(parts) + ". Run `viber truth check`.")
-        unread = unconfirmed_claims(claims)
-        if unread:
-            notes.append(
-                f"{len(unread)} truth claim(s) sit on code that moved since anyone read "
-                f"them: " + "; ".join(c["text"][:44] for c in unread[:3])
-                + ". The anchors resolve, which is not the same as the sentences being "
-                  "true. Read them, fix what is false, then `viber truth confirm`.")
-        touched = {l[3:].strip() for l in git_dirty()}
-        touched |= {l.strip() for l in _git("diff", "--name-only", "HEAD").splitlines()}
-        doubt = [c for c in claims
-                 if any(r.get("file") in touched for r in c["refs"] if r.get("file"))]
-        if doubt:
-            # A claim can resolve perfectly and still be false: the symbol is there, and
-            # what it does changed. Only the diff knows, so the diff is what raises it.
-            notes.append(
-                f"{len(doubt)} truth claim(s) anchored to files changed in this working "
-                f"tree. Their anchors still resolve, which is not the same as still being "
-                f"true. Run `viber truth surface` and reconcile each: "
-                + "; ".join(c["text"][:44] for c in doubt[:3]))
     foreign = [r for r in all_records()
                if r.get("status") not in ("done", "dropped")
                and (not_english(r.get("title", ""))
@@ -1192,8 +1162,8 @@ def cmd_check(_args):
             for a, b, _k in edges:
                 if b != f and not b.startswith(f + "::"):
                     continue
-                # A document or a record that references the file is the truth layer's
-                # business and is reported there; repeating it reads as a second finding.
+                # A document or a record that references the file is not a second
+                # file to touch, so it is not reported as one.
                 if a.startswith("doc:") or a.startswith("R-"):
                     continue
                 if a not in seen and a not in untouched:
@@ -1565,308 +1535,9 @@ def parse_opts(argv):
 
 
 
-# ---------- truth layer and relation graph ----------
-#
-# TRUTH.md holds what is true about this project right now, and nothing else. Two tests
-# decide admission: it can be checked against a file in this repo without asking anyone,
-# and it stays true when nobody is here to be asked. History, intent, state outside the
-# repo, and the agent's own uncertainty all fail one of those and belong in records.
-#
-# The anchor is what makes the file checkable. A claim carrying {% ref %} can be compared
-# with source on every run; a claim naming nothing cannot be tied to a diff and rots in
-# silence. Validation lives here rather than in a Markdoc toolchain so the CLI stays
-# stdlib-only.
+# ---------- relation graph ----------
 
-TRUTH = os.path.join(DOCS, "TRUTH.md")
-REF_RE = re.compile(r"\{%\s*ref\s+([^%]*?)%\}")
-ATTR_RE = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
 RECORD_RE = re.compile(r"\bR-\d{3}\b")
-
-
-def parse_refs(text):
-    """Every {% ref %} in order, as dicts. Unknown attributes are kept, not dropped:
-    silently ignoring an attribute is how a typo becomes an unanchored claim."""
-    out = []
-    for m in REF_RE.finditer(text):
-        out.append(dict(ATTR_RE.findall(m.group(1))))
-    return out
-
-
-def truth_claims():
-    """Claims are lines. A line with text and no ref is unanchored and is reported, since
-    that is the shape that rots. Headings, code fences, list scaffolding and blank lines
-    are not claims."""
-    if not os.path.exists(TRUTH):
-        return None
-    claims, fence, started = [], False, False
-    block, block_line = [], 0
-
-    def flush():
-        if block:
-            text = " ".join(block)
-            claims.append({"line": block_line, "text": text, "refs": parse_refs(text)})
-        del block[:]
-
-    for n, raw in enumerate(open(TRUTH, encoding="utf-8"), 1):
-        line = raw.rstrip("\n")
-        s = line.strip()
-        if s.startswith("```"):
-            flush()
-            fence = not fence
-            continue
-        if s.startswith("##"):
-            flush()
-            # Prose before the first section is the document explaining itself, not a
-            # claim about the project. Flagging it as unanchored trains the reader to
-            # ignore the warning, which is the failure the warning exists to prevent.
-            started = True
-            continue
-        if not started or fence or not s or s.startswith("#") or s.startswith(">") \
-                or set(s) <= set("-|: "):
-            # A blank line ends a claim. Anything else here is scaffolding, not prose.
-            flush()
-            continue
-        # A claim is a paragraph, not a line. Requiring one line each put the anchor on a
-        # different line from the sentence it anchors the moment the prose wrapped, and
-        # this file is meant to be read by a person, so it will wrap.
-        if not block:
-            block_line = n
-        block.append(s)
-    flush()
-    return claims
-
-
-def resolve_ref(ref):
-    """(ok, detail). 'ok' is only True when the anchor was found. Anything else says why,
-    because a check that cannot tell 'absent' from 'not looked at' is worse than none."""
-    rec = ref.get("record")
-    if rec:
-        hit = [r for r in all_records() if r.get("id") == rec]
-        return (True, rec) if hit else (False, f"record {rec} does not exist")
-    src = ref.get("file")
-    if not src:
-        return (False, "ref names neither a file nor a record")
-    path = os.path.join(ROOT, src)
-    if not os.path.exists(path):
-        return (False, f"{src} is not on the tree")
-    sym = ref.get("symbol")
-    if not sym:
-        return (True, src)
-    try:
-        with open(path, encoding="utf-8", errors="ignore") as fh:
-            hits = [ln.strip() for ln in fh if sym in ln]
-    except OSError as e:
-        return (False, f"cannot read {src} ({e})")
-    if not hits:
-        return (False, f"'{sym}' not found in {src}")
-    return (True, hits[0])
-
-
-TRUTH_LOCK = os.path.join(DOCS, "truth.lock")
-
-
-def _claim_key(claim):
-    """Identity from the text, not the line number, so editing the file above a claim
-    does not invalidate it."""
-    return hashlib.sha1(" ".join(claim["text"].split()).encode("utf-8")).hexdigest()[:12]
-
-
-def _claim_neighbourhood(claim):
-    """Files whose change could make this claim false.
-
-    An anchor proves a symbol exists. It cannot prove the sentence around it is still
-    true, and the two come apart in the case this was built for: a claim reading "the
-    crowd bar is full exactly at the enemy ceiling" stayed green while a change to a
-    different file made it false. The symbol was still there.
-
-    So the neighbourhood is wider than the anchor: the anchored file, whatever it imports
-    and whatever imports it, and any file repeating a literal from the anchored value.
-    That last one carries no import edge, which is exactly why it is the one that gets
-    missed."""
-    files = set()
-    for ref in claim["refs"]:
-        f = ref.get("file")
-        if not f:
-            continue
-        files.add(f)
-    if not files:
-        return files
-    try:
-        _n, edges, _u, parsed, _f = build_graph()
-    except Exception:
-        return files
-    for f in list(files):
-        for a, b, _k in edges:
-            if a.startswith(("doc:", "R-")):
-                continue
-            if b == f or b.startswith(f + "::"):
-                files.add(a.split("::")[0])
-            if a == f:
-                files.add(b.split("::")[0])
-    for ref in claim["refs"]:
-        if ref.get("file") and ref.get("symbol"):
-            target = "%s::%s" % (ref["file"], ref["symbol"])
-            for rel, _lits in value_echo(target, parsed)[0]:
-                files.add(rel)
-    return {f for f in files if os.path.isfile(os.path.join(ROOT, f))}
-
-
-def claim_fingerprint(claim):
-    """One hash over everything that could falsify the claim."""
-    parts = []
-    for ref in sorted(claim["refs"], key=lambda r: str(sorted(r.items()))):
-        ok, detail = resolve_ref(ref)
-        parts.append("%s:%s" % (ok, detail))
-    for rel in sorted(_claim_neighbourhood(claim)):
-        try:
-            st = os.stat(os.path.join(ROOT, rel))
-            parts.append("%s:%d:%d" % (rel, st.st_size, int(st.st_mtime)))
-        except OSError:
-            parts.append("%s:gone" % rel)
-    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
-
-
-def _lock_read():
-    out = {}
-    try:
-        with open(TRUTH_LOCK, encoding="utf-8") as fh:
-            for line in fh:
-                if "\t" in line:
-                    k, v = line.rstrip("\n").split("\t", 1)
-                    out[k] = v
-    except OSError:
-        pass
-    return out
-
-
-def _lock_write(pairs):
-    os.makedirs(DOCS, exist_ok=True)
-    with open(TRUTH_LOCK, "w", encoding="utf-8") as fh:
-        fh.write("# Written by `viber truth confirm`. One line per claim: key\tfingerprint.\n")
-        fh.write("# A claim is unconfirmed until somebody reads it against the code and\n")
-        fh.write("# runs confirm. This file records that somebody did, and when the code\n")
-        fh.write("# around the claim moves, the fingerprint stops matching and it is\n")
-        fh.write("# unconfirmed again. It says a person looked, never that they were right.\n")
-        for k, v in sorted(pairs.items()):
-            fh.write("%s\t%s\n" % (k, v))
-
-
-def unconfirmed_claims(claims):
-    """Claims whose neighbourhood moved since anyone last read them."""
-    lock = _lock_read()
-    out = []
-    for c in claims:
-        if not c["refs"]:
-            continue
-        key = _claim_key(c)
-        if lock.get(key) != claim_fingerprint(c):
-            out.append(c)
-    return out
-
-
-def cmd_truth(args):
-    sub = args[0] if args else "check"
-    # `confirm` writes the lock, so an argument it does not understand must stop
-    # it rather than be ignored: `viber truth confirm --help` used to confirm.
-    if sub == "confirm" and len(args) > 1:
-        die("viber truth confirm takes no arguments (got %s)" % " ".join(args[1:]))
-    claims = truth_claims()
-    if claims is None:
-        die(f"no truth file. Expected {os.path.relpath(TRUTH, ROOT)}")
-
-    if sub == "check":
-        broken, loose = [], []
-        for c in claims:
-            if not c["refs"]:
-                loose.append(c)
-                continue
-            for ref in c["refs"]:
-                ok, detail = resolve_ref(ref)
-                if not ok:
-                    broken.append((c, detail))
-        print(f"{len(claims)} claim(s) in {os.path.relpath(TRUTH, ROOT)}")
-        for c, why in broken:
-            print(f"  BROKEN  line {c['line']}: {why}")
-            print(f"          {c['text'][:96]}")
-        for c in loose:
-            print(f"  UNANCHORED  line {c['line']}: {c['text'][:80]}")
-        stale = unconfirmed_claims(claims)
-        for c in stale:
-            print(f"  UNCONFIRMED  line {c['line']}: {c['text'][:74]}")
-        if stale:
-            print(f"  {len(stale)} claim(s) anchored to code that moved since anyone read "
-                  f"them. An anchor that resolves is not a claim that is true. Read each "
-                  f"against the code, fix what is now false, then `viber truth confirm`.")
-        if not broken and not loose and not stale:
-            print("  every claim resolves, and every claim has been read since its code "
-                  "last moved")
-        elif not broken and not loose:
-            print("  every claim resolves against source")
-        # An unanchored claim fails too. If it cannot be anchored, either the decision
-        # was never recorded (write the record and ref it) or it is intent rather than
-        # truth (it belongs in a record). There is no third case, so there is no hatch.
-        return 1 if (broken or loose) else 0
-
-    if sub == "surface":
-        # Which claims does this diff put in doubt? The diff decides, so nobody has to
-        # know which parts of the document matter.
-        changed, how, blind = changed_files()
-        changed = set(changed)
-        if blind:
-            print("  LIMITED: " + "; ".join(blind))
-        if not changed:
-            print("no changed file detected via " + (", ".join(how) or "nothing")
-                  + ". That is not the same as nothing having changed.")
-            return 0
-        hit = []
-        for c in claims:
-            for ref in c["refs"]:
-                f = ref.get("file")
-                if f and f in changed:
-                    hit.append((c, f))
-                    break
-        print(f"{len(changed)} changed file(s), {len(hit)} claim(s) to reconcile")
-        for c, f in hit:
-            print(f"  line {c['line']}  ({f})  {c['text'][:80]}")
-        return 0
-
-    if sub == "gaps":
-        # The check nobody else performs: not "is what we wrote true" but "what does the
-        # code contain that we wrote nothing about". A truth file cannot report its own
-        # silence, and silence is where the expensive surprises live.
-        covered = {r.get("file") for c in claims for r in c["refs"] if r.get("file")}
-        groups, hit = {}, {}
-        for rel in candidate_sources():
-            parts = rel.split(os.sep)
-            key = os.sep.join(parts[:2]) if len(parts) > 2 else parts[0]
-            groups[key] = groups.get(key, 0) + 1
-            if rel in covered:
-                hit[key] = hit.get(key, 0) + 1
-        rows = sorted(groups.items(), key=lambda kv: -kv[1])
-        silent = [(k, n) for k, n in rows if not hit.get(k)]
-        print(f"{len(covered)} file(s) anchored by {len(claims)} claim(s), across "
-              f"{len(rows)} area(s) of the tree.")
-        print(f"{len(silent)} area(s) no claim touches at all:")
-        for k, n in silent[:20]:
-            print(f"  {n:>4} file(s)  {k}")
-        if len(silent) > 20:
-            print(f"  ... and {len(silent) - 20} more")
-        print("\nAn area with no claim is not an area with nothing to say. It is an area "
-              "nobody has said anything about, which reads the same from here and does "
-              "not read the same in six months.")
-        return 0
-
-    if sub == "confirm":
-        # The one thing a tool cannot do is read a sentence and decide it is still true.
-        # So it records that somebody did. This is an assertion by whoever runs it, not a
-        # verification: it is worth exactly as much as their reading was.
-        pairs = {_claim_key(c): claim_fingerprint(c) for c in claims if c["refs"]}
-        _lock_write(pairs)
-        print(f"{len(pairs)} claim(s) recorded as read against the current code.")
-        print("This states that you read them, not that they are correct.")
-        return 0
-
-    die("usage: viber truth [check|surface|confirm|gaps]")
 
 
 # ---------- code graph ----------
@@ -2568,16 +2239,14 @@ _GRAPH_CACHE = {}
 
 
 def build_graph():
-    """Nodes and edges that are stated, never inferred. Records cite ids, the truth file
-    carries refs, documents link each other. Anything requiring an AST is out of scope and
+    """Nodes and edges that are stated, never inferred. Records cite ids, documents
+    mention records and link each other. Anything requiring an AST is out of scope and
     is reported as uncovered rather than silently returned as no edges.
 
-    Memoised for the life of one process. `check` asks for a claim's neighbourhood once
-    per TRUTH claim, and each ask re-parsed the whole source tree: one project reached 60
-    rebuilds and 47 seconds per prompt, past the hook timeout. Nothing inside a single run
-    writes a record, a doc or a source file, so the graph cannot change under it. Building
-    once also makes the claims agree with each other, which they did not while a subagent
-    was writing files through the run."""
+    Memoised for the life of one process. A repeated ask used to re-parse the whole
+    source tree: one project reached 60 rebuilds and 47 seconds per prompt, past the hook
+    timeout. Nothing inside a single run writes a record, a doc or a source file, so the
+    graph cannot change under it."""
     if "graph" in _GRAPH_CACHE:
         return _GRAPH_CACHE["graph"]
 
@@ -2599,20 +2268,10 @@ def build_graph():
             key = f"doc:{fn}"
             nodes[key] = {"kind": "doc", "label": fn}
             text = open(os.path.join(DOCS, fn), encoding="utf-8", errors="ignore").read()
-            for ref in parse_refs(text):
-                if ref.get("record"):
-                    edges.append((key, ref["record"], "refs"))
-                elif ref.get("file"):
-                    sym = f"{ref['file']}::{ref.get('symbol', '')}".rstrip(":")
-                    nodes.setdefault(sym, {"kind": "symbol", "label": sym})
-                    edges.append((key, sym, "refs"))
             for rid in set(RECORD_RE.findall(text)):
                 edges.append((key, rid, "mentions"))
             for link in re.findall(r"\]\(([^)]+\.md)\)", text):
                 edges.append((key, f"doc:{os.path.basename(link)}", "links"))
-
-    if not os.path.exists(TRUTH):
-        uncovered.append(f"{os.path.relpath(TRUTH, ROOT)} absent: no doc-to-symbol edges")
 
     # Code edges merge into the same graph on purpose. A question like "what rests on this
     # constant" has answers of both kinds -- a file that imports it and a decision that
@@ -3168,8 +2827,6 @@ def _bash_triggers(cmd, cwd):
                 keys.add("memory")
             if args[0] == "new" and args[1:2] == ["lesson"]:
                 keys.add("learning")
-            if args[0] == "truth":
-                keys.add("truth")
         elif base in ("grep", "egrep", "fgrep", "rg"):
             if any(a.endswith(".viber/memory/index.md") for a in args):
                 keys.add("memory")
@@ -4611,7 +4268,7 @@ COMMANDS = {"new": cmd_new, "set": cmd_set, "list": cmd_list, "show": cmd_show,
             "state": cmd_state, "index": cmd_index, "check": cmd_check, "init": cmd_init,
             "doctor": cmd_doctor,
             "trigger": cmd_trigger, "lessons": cmd_lessons, "finding": cmd_finding,
-            "truth": cmd_truth, "graph": cmd_graph, "guard": cmd_guard,
+            "graph": cmd_graph, "guard": cmd_guard,
             "recompact": cmd_recompact, "handoff": cmd_handoff, "compactions": cmd_compactions,
             "upgrade": cmd_upgrade, "version": cmd_version}
 
