@@ -38,7 +38,7 @@ Rate for the harm if the finding is real. Never lower a rating because you are u
 
 Judge the worst realistic outcome. If the harm needs one more condition that is not established, drop one level. Do not rate how hard the fix is.
 
-High and in-scope medium block the commit, so a wrong rating in either direction costs a fix round or ships a defect. Rate what you can point at, not what you fear.
+High and in-scope medium block the commit, so a wrong rating in either direction costs a fix round or ships a defect. Rate what you can point at, not what you fear. A suspicion with neither a traced `file:line` path nor a reproduction goes under `checked:` as unverified, never under `findings:`.
 
 ## Scope
 

@@ -10,6 +10,7 @@
 - V6 Rule sweep
 - V7 Stress inputs
 - V8 Console and copy
+- V9 Fresh-eyes critique
 
 ## Loop and checklist
 
@@ -24,6 +25,7 @@ Copy this into the task. Run every step that applies to the change.
 - [ ] V6 rule sweep greps clean
 - [ ] V7 stress inputs survive
 - [ ] V8 no console errors; every visible string re-read
+- [ ] V9 fresh-eyes critique, new screens and brand pages
 ```
 
 Feedback loop: run the list, fix every fail, then rerun the whole list (a fix can break an earlier step). Stop only when a full run has no fail.
@@ -66,6 +68,8 @@ Bars: accessibility 100 on every page run; mobile performance 90 or above. Best 
 
 - Tab through the changed screen: every control is reachable in a logical order and shows a visible focus ring. (WCAG 2.2 SC 2.1.1, 2.4.3, 2.4.7)
 - Emulate `prefers-reduced-motion: reduce`: non-essential animation stops or shortens. (U15)
+- Open every dialog by keyboard: Tab cycles inside, Escape closes, focus lands back on the trigger (U36).
+- Click every control that declares state; confirm the attribute and the rendering both change (U39).
 
 ## V6. Rule sweep
 
@@ -85,12 +89,29 @@ Load the changed screen with each input and confirm nothing overflows, overlaps,
 - empty data (U12);
 - offline or a failed request (U12);
 - a double-click on submit (P7);
-- browser zoom at 200% (U19; WCAG 2.2 SC 1.4.4).
+- browser zoom at 200% (U19; WCAG 2.2 SC 1.4.4);
+- text-spacing override: line-height 1.5, letter-spacing 0.12em, word-spacing 0.16em; nothing clips (WCAG 2.2 SC 1.4.12).
+
+If horizontal overflow shows at 360 px, check first:
+- an `<input>` keeps about 20ch of intrinsic width in a grid: `inline-size:100%; min-inline-size:0`;
+- a grid or flex item keeps `min-width:auto`: `min-inline-size:0`, or `grid-template-columns:minmax(0,1fr)`;
+- an unbroken email or URL: `overflow-wrap:anywhere` (`break-word` does not shrink min-content);
+- a `nowrap` pill or tooltip: `max-inline-size:min(<n>rem, calc(100vw - <gutter>))`;
+- a `.sr-only` span with no positioned ancestor inside a scroller inflates `scrollWidth` while nothing visible overflows;
+- form rows: `align-items:start`, so a field with a hint does not stretch its neighbour.
 
 ## V8. Console and copy
 
 - The browser console shows no error and no warning on load and through the main flow.
 - Re-read every visible string on the changed screen once, against U16, U33 to U35, HS1 and HS2.
 - Optional: impeccable's anti-pattern detector (`npx impeccable@4.1.0`, flags in its `--help`) flags many section 4 and 6 bans automatically. Its findings are leads; the rule IDs decide.
+
+## V9. Fresh-eyes critique (new screens and brand pages, not small fixes)
+
+- Give the V4 screenshots and the changed files to an `analyst` agent that has not seen the build conversation. Instruct it to argue for rejection. A `reviewer` reads code defects and is not used here.
+- Lenses: focal point (U37), type scale, outer spacing larger than inner, colour discipline, content realism (no "Item 1", no "No data"), stress inputs (V7), copy, interaction truth (U39).
+- Every finding cites a screenshot path, a `file:line` or a measured value. Verdict: reject, rework or ship.
+- Passing V1 to V8 is never evidence of taste.
+- Fix every finding. No finding is ranked minor and shipped, and none is deferred.
 
 Sources: addyosmani/web-quality-skills (MIT) for the audit order and Core Web Vitals thresholds; web.dev Web Vitals; Lighthouse CLI; WCAG 2.2.

@@ -87,15 +87,23 @@ Layout
 - **U25** One icon family and one stroke width per product.
 - **U26** Primary navigation fits one line at 1024 px or collapses into a menu.
 - **U27** Button labels do not wrap at 1024 px and wider.
+- **U37** Every screen has one lead element (largest, heaviest or first) so the eye has a place to start. Three or more equal-size sibling blocks fail, unless they are rows of like items (a list, table or gallery). A long list of like items surfaces one differentiator, such as recency or status.
+- **U38** An empty state fills the viewport it sits in and names the next action. A small block under the header with blank space below it fails.
+- **U42** A sticky or fixed header, footer or banner never fully covers the focused element. Set `scroll-padding-top` to the header height. (WCAG 2.2 SC 2.4.11)
+- **U43** Body text is left-aligned, never justified.
 
 States and interaction
 - **U11** Every interactive component has default, hover, focus-visible, active, disabled and loading states. Focus is never removed without a visible replacement. (Vercel Web Interface Guidelines; WCAG 2.2 SC 2.4.7)
 - **U12** Every data region has a designed empty, loading and error state. Loading in content is a skeleton, not a centred spinner. An error says what failed and offers a retry. One failing region never blanks the page.
-- **U13** A destructive action has a confirm step or an undo window. (Vercel Web Interface Guidelines)
+- **U13** A destructive action has a confirm step or an undo window. Initial focus in a destructive confirm goes to Cancel, never to the destructive button. (Vercel Web Interface Guidelines)
 - **U28** Hover is never the only way to reach a function or a piece of information.
 - **U29** Every gesture (swipe, long press, drag) has a visible control that does the same thing. (WCAG 2.2 SC 2.5.1, 2.5.7)
 - **U30** The mobile layout keeps every function the desktop layout has.
 - **U31** A redesign keeps URLs, anchor ids, navigation labels, form field names, analytics ids and legal copy unless the requester approved the change.
+- **U36** A modal dialog takes focus on open, keeps Tab and Shift+Tab inside, closes on Escape, and returns focus to the control that opened it. It has an accessible name. A native `<dialog>` opened with `showModal()` meets this. (WCAG 2.2 SC 2.1.2, 2.4.3)
+- **U39** A control that declares state (`aria-pressed`, `aria-expanded`, `aria-sort`, `aria-checked`, `aria-selected`) changes that state on click or key press, and its look changes with it. An attribute that flips while the render stays identical fails.
+- **U40** A success message appears only when the visible data changed too. A "created" toast over an unchanged list fails.
+- **U41** A region that scrolls sideways shows it: an edge fade, a visible scrollbar or an arrow.
 
 Motion
 - **U14** Motion conveys a state change. Product transitions run 150 to 250 ms; staggered entrances finish within 900 ms `[default]`. Only `transform` and `opacity` animate. No `transition: all`. No bounce or elastic easing. Animation never blocks input. (Vercel Web Interface Guidelines)
@@ -129,6 +137,8 @@ Semantics (web)
 - **P12** The current location is always visible: active navigation item, page title or breadcrumb.
 - **P13** A control hidden or disabled for lack of permission says why, where the user would expect it.
 - **P14** Onboarding has a visible skip, is not shown again to a returning user, and a dismissed tip stays dismissed.
+- **P15** One action role, one variant: the destructive action wears the same danger style on its trigger and on its confirm button. Primary is the single main action. Secondary is never a coloured fill.
+- **P16** Sign-in and verification fields allow paste and password managers (`autocomplete` set, no paste block). No step needs a puzzle, a transcription or a CAPTCHA without an alternative. A multi-step form never re-asks a value already entered. (WCAG 2.2 SC 3.3.7, 3.3.8)
 
 ## 6. Brand and landing pages
 
@@ -139,6 +149,7 @@ Semantics (web)
 - **B5** The primary call to action is visible without scrolling at 1440x900 and 390x844. `[default]`
 - **B6** No section flips between light and dark theme mid-page.
 - **B7** No filler verbs or adjectives: "elevate", "seamless", "unleash", "next-gen", "revolutionize".
+- **B8** The largest heading is at least 2.5x the body size and wraps to 3 lines or fewer. `[default]`
 
 ## 7. Review output
 
