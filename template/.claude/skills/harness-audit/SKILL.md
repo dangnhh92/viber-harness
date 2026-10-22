@@ -24,7 +24,7 @@ Judge the harness by what actually happened, against its own rules. The audit re
 | Compactions | transcript `type: system`, `subtype: compact_boundary`, with `preTokens` and `postTokens` | context size at each compaction |
 | Summary sources | `python3 .viber/bin/viber compactions [--last N]` | per summary, how many lines with a number name a path, command or agent id |
 | Token report | `python3 .claude/skills/harness-audit/tokens.py --since <date> [--project x] [--session id] [--json]`, run from the project root | cost per project and session, main against subagents, what starts each turn, re-reads, large tool results, cache rebuilds, compactions |
-| Spawn log | `.viber/memory/.spawns.jsonl` (`agent`, `model`, `effort`, `refused`) | the agent, model and effort of each spawn |
+| Spawn log | `.viber/memory/.spawns.jsonl` (`agent`, `model`, `effort`, `refused`, and since the routing guard `routing` and `pick`) | the agent, model and effort of each spawn, the ROUTING answers and the pick computed from them |
 | Records | `.viber/memory/index.md`, the records dir, `viber doctor`, `viber check` | open signals, findings and repeats, stale titles, decisions |
 | Git | `git log` per project, `git log origin/<branch>..` | commits by type, review gate, unpushed work |
 | Other orchestration | any relay, scheduler or bot log the project keeps (find it in CLAUDE.md or the repo) | delegated runs, their cost and outcome |
@@ -40,12 +40,12 @@ Run the sections the question needs. For "is everything ok", run all five.
 - Every hook in `.claude/settings.json` shows up in transcripts since that file last changed. Look for a non-zero `exitCode`, `hook_cancelled`, and `durationMs` over 2000 (a slow hook taxes every prompt).
 - `viber doctor` in each active project: dead hooks, agents without `model:`, a viber binary behind the release it was installed from.
 - After each `compact_boundary`, the recompact hook fired, and the guard injected each on-demand rules file at its trigger.
-- Each finished agent left a file in `.viber/handoffs/`, and the recompact output named the newest.
+- Each finished agent left a file in `.viber/handoffs/`, and the recompact output named the newest. A stop without a `HANDOFF:`, `REVIEW:` or `RECORDS:` block is appended to that agent's existing file under `[follow-up, saved ...]`; a second file for the same agent id starts only at a stop that carries one of those blocks.
 
 **2. Did the work follow the rules?**
 - Every `feat`, `fix` or `refactor` commit that touches code has a `reviewer` spawn before it in that project's transcripts (`.viber/docs/rules/review-gate.md`).
-- Spawns: none is `general-purpose` or bare; every one names a model and an effort; none runs at `low`. Check a sample against the routing table in CLAUDE.md, for example `builder` on a decided brief, or `haiku` on a read over 100k tokens.
-- Handoffs: each agent result has a `HANDOFF:` block, and the orchestrator ran at least one verifying command after it before reporting to the owner.
+- Spawns: every allowed row other than `reviewer`, `runner` and `fork` has `routing` answers, and its `model` and `effort` equal its `pick`, and so does its `agent` when it is a routed agent (`analyst`, `builder`, `coder`, `grunt`); any other kind (Explore, Plan, a plugin or custom agent) is free; no row is `general-purpose` or bare; those three name a model and an effort, none at `low`. Older rows have no `routing`; judge them against the routing table in CLAUDE.md. For a wrong spawn, say which it was: a wrong answer (read the brief against the questions in `viber route`), or a wrong mapping (the pick for those answers contradicts CLAUDE.md section 3).
+- Handoffs: each agent result has a `HANDOFF:` block, and the orchestrator ran at least one verifying command after it before reporting to the owner. `[follow-up]` sections in a handoff file are wake-up turns, not results.
 - Every `RECORDS:` block in an agent result was transcribed: a matching `viber new` follows it.
 - Any project-specific delegation rule in CLAUDE.md, checked against its own log.
 

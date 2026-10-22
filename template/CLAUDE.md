@@ -87,15 +87,15 @@ Tie-breaks: brief says what to do, `coder` (the review gate catches what it miss
 - **A build, suite, simulator session or capture is a plan for `runner`, not commands you run yourself.** Every tool call you make re-reads your whole context on your model; a long session running builds and sims burns most of the budget. A one-line check stays yours.
 - **A capture or walkthrough gets a written plan first**: the data to seed, the screens, the steps. `runner` executes it and you look at every artifact, so a capture is never a reason for `builder` or for a higher tier. A one-off instruction in a brief ("the owner checks these by eye") binds that task only, never the tier rules.
 
-**Step 2, the model for this spawn.** Start from the agent's default; move at most one tier (haiku, sonnet, opus) per answer:
+**Step 2, the model for this spawn.** Start from the agent's default; move at most one tier (haiku, sonnet, opus) in total, and a second failure always moves up one more:
 
 1. **Will the result be trusted without anyone re-checking it?** A root cause, a design, a judgement about money, auth, security, or unrecoverable data. Go up. Carrying out a decided brief in those areas is not this: the review gate checks it.
-2. **Will you, or a reviewer, check every part of it anyway?** Every screenshot, number, diff. Go down: the check is where the quality comes from.
+2. **Will you, or a reviewer, check every part of it anyway?** Every screenshot, number, diff. Go down one tier from an `opus` default: the check is where the quality comes from. The `coder` and `grunt` defaults already assume the check.
 3. **Would a wrong result be caught only by the owner?** Go up. The owner is not a test suite.
 4. **Must the agent read more than about 100k tokens?** Avoid `haiku`: its price jumps past that size, and a long read is where a small model drops things.
 5. **Did this agent already fail this same piece twice on this model?** Go up one tier. Never a third try on the same model.
 
-Name the chosen model and a one-line reason in the spawn, so a wrong call is visible afterwards. When nothing applies, the default stands. **Always name an agent**, never `general-purpose` or a bare spawn: those inherit your model and price on the cheapest work.
+Name the chosen model and a one-line reason in the spawn, so a wrong call is visible afterwards. Every spawn except `reviewer`, `runner` and `fork` carries one line `ROUTING: code=y mechanical=n open_decision=n rechecked=y owner_only=n big_read=n failed_twice=n security=n edge_cases=n`; the guard computes the pick with `viber route` and refuses a spawn that differs. When nothing applies, the default stands. **Always name an agent**, never `general-purpose` or a bare spawn: those inherit your model and price on the cheapest work.
 
 ## 4. Memory and documents
 

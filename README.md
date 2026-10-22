@@ -26,7 +26,7 @@ sequenceDiagram
     Hooks->>Orchestrator: SessionStart: viber state (state.md into context)
     You->>Orchestrator: prompt
     Hooks->>Orchestrator: UserPromptSubmit: viber state + viber check (what is open, what is hanging)
-    Hooks->>Orchestrator: PreToolUse: viber guard (refuses a bare spawn, asks before commit, push or env read)
+    Hooks->>Orchestrator: PreToolUse: viber guard (refuses a spawn that differs from its ROUTING pick, asks before commit, push or env read)
     Orchestrator->>You: clarify until the ask is unambiguous
     Orchestrator->>Orchestrator: acceptance criteria + task record (scope contract)
     Orchestrator->>Agent: dispatch: anchor, criteria, recalled lessons
@@ -61,7 +61,7 @@ Everything lives in `template/`. `viber upgrade` puts it into your project and k
 | Pain | Mechanism |
 |---|---|
 | The agent says "done" and it is not | Acceptance criteria are written before dispatch, by the orchestrator, not the agent. The agent reports against them in a `HANDOFF:` block; the orchestrator re-runs the riskiest claims itself before accepting. |
-| Hard work goes to a cheap model, trivial work to an expensive one | Four routing questions pick the agent (the kind of work); five more pick the model for each spawn, starting from the agent's default and moving at most one tier per answer. Effort is chosen per spawn too, never below medium. A decided brief goes to `coder`, an open question to `builder`. The guard refuses a spawn that names no agent, model or effort, and a definition with no model line is reported every prompt. |
+| Hard work goes to a cheap model, trivial work to an expensive one | Four routing questions pick the agent (the kind of work); five more pick the model for each spawn, starting from the agent's default and moving at most one tier in total. Effort is chosen per spawn too, never below medium. A decided brief goes to `coder`, an open question to `builder`. Each spawn carries its answers in one `ROUTING:` line; the guard computes the agent, model and effort from them (`viber route`) and refuses a spawn that differs, and a definition with no model line is reported every prompt. |
 | Context is lost between sessions | Decisions, tasks, lessons and issues are records on disk. The session-start hook regenerates them into the first prompt. |
 | Numbers in memory go stale | A fact is stored as a location (`file` + `symbol`), never as a value; state resolves it from source on every regen. |
 | Docs drift from code | There is no hand-written statement of what is true now. The Facts block in `viber state` is generated from `fact` pointers (`file` + `symbol`) and resolved from source on every regen, so it cannot silently rot. A pointer whose symbol is gone prints a loud not-found line instead of an old value. Records hold only why, intent and lessons. |

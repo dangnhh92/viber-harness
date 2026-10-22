@@ -15,7 +15,8 @@ state.md and index.md are generated; never hand-edit them.
   viber finding <file> "<problem>" [--severity high]   record a review finding, repeats detected automatically
   viber trigger <kind> "<what happened>"   raise a learning signal
   viber lessons --for <role> [--tags a,b] [--limit 5]   ranked, capped lesson recall
-  viber guard          PreToolUse hook: refuse bare spawns, nudge, re-inject rules files (reads stdin)
+  viber guard          PreToolUse hook: refuse spawns that differ from their ROUTING pick, nudge, re-inject rules files (reads stdin)
+  viber route "<answers>"   the agent, model and effort CLAUDE.md section 3 gives for a ROUTING line
   viber recompact      SessionStart(compact) hook: list the files CLAUDE.md says to read on demand
   viber handoff        SubagentStop hook: save each agent's final report under .viber/handoffs/ (reads stdin)
   viber compactions [--last 10] [--dir PATH]   how many summary lines with a number name their source
@@ -3284,6 +3285,152 @@ def _bash_ask(command, is_sub=False, cwd=None):
     return found
 
 
+# Spawn routing. The orchestrator answers fixed questions in a ROUTING line, and one
+# function maps the answers to agent, model and effort (CLAUDE.md section 3). A wrong
+# spawn then traces to a wrong answer or a wrong mapping, nothing else.
+ROUTE_QUESTIONS = (
+    ("code", "Is the deliverable code? (n: an answer, decision, design or document)"),
+    ("mechanical", "Is it one fully-determined rule repeated across more than one file, with no decision anywhere?"),
+    ("open_decision", "Does it still need a design decision, or is it a risky refactor whose blast radius you cannot state?"),
+    ("rechecked", "Will you or a reviewer check every part of the result anyway (every screenshot, number, diff)?"),
+    ("owner_only", "Would a wrong result be caught only by the owner?"),
+    ("big_read", "Must the agent read more than about 100k tokens?"),
+    ("failed_twice", "Did this agent already fail this same piece twice on this model?"),
+    ("security", "Is this a security audit?"),
+    ("edge_cases", "Are edge cases likely?"),
+)
+ROUTE_TIERS = ("haiku", "sonnet", "opus")
+ROUTE_EFFORTS = ("medium", "high", "xhigh")
+# Used only when the project's agent file has no model: line. doctor flags that case.
+ROUTE_DEFAULT_MODELS = {"analyst": "opus", "builder": "opus", "coder": "sonnet", "grunt": "haiku"}
+# These roles are fixed by who calls them, not routed by the questions.
+ROUTE_EXEMPT = ("reviewer", "runner", "fork")
+ROUTING_RE = re.compile(r"^\s*ROUTING:[ \t]*(.*)$", re.M)
+
+
+def routing_format():
+    return "ROUTING: " + " ".join(f"{k}=y|n" for k, _q in ROUTE_QUESTIONS)
+
+
+def routing_checklist():
+    lines = ["Answer each question with y or n:"]
+    lines += [f"- {k}: {q}" for k, q in ROUTE_QUESTIONS]
+    lines.append("Then put one line in the spawn prompt, in this format: " + routing_format())
+    return "\n".join(lines)
+
+
+def _unfenced(text):
+    """The text outside ``` fences, so a quoted example line is not read as the answer."""
+    kept, fenced = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def parse_routing(text):
+    """(answers, None) for a valid line, else (None, the reason it is not valid)."""
+    found = ROUTING_RE.findall(_unfenced(str(text or "")))
+    if not found:
+        return None, "the prompt has no ROUTING line"
+    if len(found) > 1:
+        return None, "the prompt has %d ROUTING lines: one ROUTING line only" % len(found)
+    answers, wanted = {}, [k for k, _q in ROUTE_QUESTIONS]
+    for token in found[0].split():
+        key, sep, value = token.partition("=")
+        if not sep or key not in wanted or value not in ("y", "n") or key in answers:
+            return None, f"the ROUTING line has a bad token `{token}`"
+        answers[key] = value == "y"
+    missing = [k for k in wanted if k not in answers]
+    if missing:
+        return None, "the ROUTING line is missing " + ", ".join(missing)
+    return answers, None
+
+
+def _agent_default_model(kind, root):
+    """The model: line of the agent definition the spawn uses, else the section 3 table."""
+    try:
+        with open(os.path.join(root, ".claude", "agents", kind + ".md"), encoding="utf-8") as fh:
+            m = re.search(r"^model:\s*(\S+)\s*$", fh.read(4000), re.M)
+        if m and m.group(1) in ROUTE_TIERS:
+            return m.group(1), f"{kind} default {m.group(1)} (.claude/agents/{kind}.md)"
+    except (OSError, ValueError):
+        # ValueError covers UnicodeDecodeError: an unreadable file falls back to the table.
+        pass
+    return ROUTE_DEFAULT_MODELS[kind], f"{kind} default {ROUTE_DEFAULT_MODELS[kind]} (built-in table)"
+
+
+def route(answers, root=None):
+    """CLAUDE.md section 3 as a function: {agent, model, effort, why}."""
+    a, why = answers, []
+    if not a["code"]:
+        agent = "analyst"
+        why.append("agent analyst: code=n")
+    elif a["open_decision"]:
+        # Any judgment means not grunt, so this is checked before mechanical.
+        agent = "builder"
+        why.append("agent builder: open_decision=y")
+    elif a["mechanical"]:
+        agent = "grunt"
+        why.append("agent grunt: mechanical=y")
+    else:
+        agent = "coder"
+        why.append("agent coder: code=y, mechanical=n, open_decision=n")
+    default, source = _agent_default_model(agent, root or ROOT)
+    why.append(source)
+    start = ROUTE_TIERS.index(default)
+    up = not a["rechecked"] or a["owner_only"] or a["security"]
+    # The coder and grunt defaults already assume the check, so only an opus default goes down.
+    down = a["rechecked"] and default == "opus"
+    tier = min(max(start + int(up) - int(down), 0), len(ROUTE_TIERS) - 1)
+    if up:
+        why.append("model up: " + ", ".join(n for n, on in (
+            ("rechecked=n", not a["rechecked"]), ("owner_only=y", a["owner_only"]),
+            ("security=y", a["security"])) if on))
+    if down:
+        why.append("model down: rechecked=y on an opus default")
+    if a["big_read"] and tier == 0:
+        tier = 1
+        why.append("model floor sonnet: big_read=y")
+    effort = 1 if (not a["rechecked"] or a["edge_cases"]) else 0
+    if effort:
+        why.append("effort high: " + ", ".join(n for n, on in (
+            ("rechecked=n", not a["rechecked"]), ("edge_cases=y", a["edge_cases"])) if on))
+    if a["failed_twice"]:
+        # Never a third try on the same model; at the top tier the effort moves instead.
+        if tier < len(ROUTE_TIERS) - 1:
+            tier += 1
+            why.append("model up one more: failed_twice=y")
+        else:
+            effort = min(effort + 1, 2)
+            why.append(f"effort {ROUTE_EFFORTS[effort]}: failed_twice=y at opus")
+    if tier < start:
+        effort = max(effort, 1)
+        why.append("effort high: the model moved down a tier")
+    if a["security"]:
+        effort = 2
+        why.append("effort xhigh: security=y")
+    return {"agent": agent, "model": ROUTE_TIERS[tier], "effort": ROUTE_EFFORTS[effort], "why": why}
+
+
+def cmd_route(args):
+    """Print the pick for a ROUTING line: `agent model effort` first, then the reasons."""
+    line = " ".join(args)
+    if line and not ROUTING_RE.search(line):
+        line = "ROUTING: " + line
+    answers, problem = parse_routing(line)
+    if problem:
+        print(f"viber: {problem}.\n{routing_checklist()}", file=sys.stderr)
+        return 2
+    pick = route(answers)
+    print(f"{pick['agent']} {pick['model']} {pick['effort']}")
+    for reason in pick["why"]:
+        print("  " + reason)
+    return 0
+
+
 def cmd_guard(_args):
     try:
         ev = json.load(sys.stdin)
@@ -3307,27 +3454,63 @@ def cmd_guard(_args):
         return 0
     if tool in ("Agent", "Task"):
         kind, model, effort = inp.get("subagent_type"), inp.get("model"), inp.get("effort")
-        problems = []
-        if not kind or kind == "general-purpose":
-            problems.append("name an agent from .claude/agents (never general-purpose or a bare spawn)")
-        if kind != "fork" and not model:
-            problems.append("pass model")
-        if kind != "fork" and not effort:
-            problems.append("pass effort")
-        if effort == "low":
-            problems.append("effort floor is medium")
+        answers = pick = refusal = None
+        if kind in ROUTE_EXEMPT:
+            problems = []
+            if kind != "fork" and not model:
+                problems.append("pass model")
+            if kind != "fork" and not effort:
+                problems.append("pass effort")
+            if effort == "low":
+                problems.append("effort floor is medium")
+            if problems:
+                refusal = ("Spawn refused: " + "; ".join(problems) + ". %s is a fixed role: "
+                           "name its model and effort from CLAUDE.md section 3." % kind)
+        elif not kind or kind == "general-purpose":
+            refusal = ("Spawn refused: name an agent from .claude/agents (never general-purpose "
+                       "or a bare spawn).")
+        else:
+            answers, problem = parse_routing(inp.get("prompt"))
+            if problem:
+                refusal = f"Spawn refused: {problem}.\n" + routing_checklist()
+            else:
+                try:
+                    pick = route(answers)
+                except Exception as exc:
+                    # Fail open, as every guard does, but say so: a silent allow
+                    # hides a broken mapping.
+                    print(f"viber guard: route() failed, spawn not checked: {exc!r}", file=sys.stderr)
+                    return 1
+                # The questions pick only the four routed agents. Any other kind (Explore,
+                # Plan, a plugin agent, a custom agent file) is free, so only its model and
+                # effort must match.
+                routed = kind in ROUTE_DEFAULT_MODELS
+                if not routed and (model, effort) != (pick["model"], pick["effort"]):
+                    refusal = ("Spawn refused: %s is not a routed agent (analyst, builder, coder, "
+                               "grunt), so its kind is free and only model and effort are checked. "
+                               "The ROUTING answers "
+                               "give %s/%s, and this spawn is %s/%s. The answers that decided it:"
+                               "\n- %s\nSpawn %s on the computed model and effort, or correct the "
+                               "answer that is wrong."
+                               % (kind, pick["model"], pick["effort"], model, effort,
+                                  "\n- ".join(pick["why"]), kind))
+                elif routed and (kind, model, effort) != (pick["agent"], pick["model"], pick["effort"]):
+                    refusal = ("Spawn refused: the ROUTING answers give %s/%s/%s, and this spawn "
+                               "is %s/%s/%s. The answers that decided it:\n- %s\nSpawn the "
+                               "computed pick, or correct the answer that is wrong."
+                               % (pick["agent"], pick["model"], pick["effort"], kind, model,
+                                  effort, "\n- ".join(pick["why"])))
         try:
             os.makedirs(MEM, exist_ok=True)
             with open(SPAWNS, "a") as fh:
                 fh.write(json.dumps({"at": now(), "agent": kind, "model": model, "effort": effort,
-                                     "refused": bool(problems)}) + "\n")
+                                     "refused": bool(refusal), "routing": answers,
+                                     "pick": pick and {k: pick[k] for k in ("agent", "model", "effort")}})
+                         + "\n")
         except OSError:
             pass
-        if problems:
-            _hook_out("deny", "Spawn refused: " + "; ".join(problems) + ". Choose per CLAUDE.md "
-                      "section 3: decided brief that gets checked = coder/sonnet/medium; find the "
-                      "cause or design = builder/opus/high; written test or capture plan = "
-                      "runner/haiku/medium. Then spawn again with the reason in the prompt.")
+        if refusal:
+            _hook_out("deny", refusal)
             return 0
         if kind in ("coder", "builder", "grunt") and not ev.get("agent_id"):
             keys.add("gate")
@@ -3408,15 +3591,32 @@ def cmd_handoff(_args):
         if not os.path.exists(ignore):
             with open(ignore, "w", encoding="utf-8") as fh:
                 fh.write("*\n")
-        # A SubagentHandback report arrives just before the SubagentStop, whose message is
-        # only the closing text. A later stop of the same agent (it was sent more work) is
-        # a new report and is kept.
-        if not handback and aid != "noid":
+        result = bool(re.search(r"^\s*(HANDOFF|REVIEW|RECORDS):", text, re.M))
+        # A SubagentHandback report arrives just before the SubagentStop, whose message
+        # repeats its closing text. Only that repeat is dropped, never a result. The age
+        # comes from the saved: header, because a follow-up append refreshes the mtime.
+        if not handback and not result and aid != "noid":
             recent = datetime.now().timestamp() - 300
             for name in os.listdir(HANDOFFS):
-                if name.endswith(f"-{aid}-handback.md") and \
-                        os.path.getmtime(os.path.join(HANDOFFS, name)) > recent:
+                if not name.endswith(f"-{aid}-handback.md"):
+                    continue
+                with open(os.path.join(HANDOFFS, name), encoding="utf-8") as fh:
+                    saved_report = fh.read()
+                m = re.search(r"^saved: (\S+)", saved_report, re.M)
+                if m and datetime.fromisoformat(m.group(1)[:26]).timestamp() > recent \
+                        and text.strip() in saved_report:
                     return 0
+        # A background job or a child agent can wake a stopped agent, and each extra turn
+        # stops again with only a closing line. Without a HANDOFF block that line goes
+        # into the agent's existing report. A stop with a HANDOFF, REVIEW or RECORDS block
+        # is a result and gets its own file.
+        if not handback and aid != "noid" and not result:
+            earlier = sorted(n for n in os.listdir(HANDOFFS)
+                             if n.endswith((f"-{aid}.md", f"-{aid}-handback.md")))
+            if earlier:
+                with open(os.path.join(HANDOFFS, earlier[-1]), "a", encoding="utf-8") as fh:
+                    fh.write(f"\n\n[follow-up, saved {now()}]\n\n" + text[:HANDOFF_MAX_CHARS])
+                return 0
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         kind = re.sub(r"[^A-Za-z0-9_-]", "-", agent)[:40]
         path = os.path.join(HANDOFFS, f"{stamp}-{kind}-{aid}" + ("-handback" if handback else "") + ".md")
@@ -4249,8 +4449,6 @@ def _template_report():
                    "below the CLAUDE.md marker or into the template." % ", ".join(edited))
     if missing:
         out.append("removed since the stamp, kept out by upgrade: " + ", ".join(missing))
-    out.append("newer template: git -C <viber> pull, then python3 "
-               "<viber>/template/.viber/bin/viber upgrade %s" % ROOT)
     return out
 
 
@@ -4270,7 +4468,7 @@ COMMANDS = {"new": cmd_new, "set": cmd_set, "list": cmd_list, "show": cmd_show,
             "trigger": cmd_trigger, "lessons": cmd_lessons, "finding": cmd_finding,
             "graph": cmd_graph, "guard": cmd_guard,
             "recompact": cmd_recompact, "handoff": cmd_handoff, "compactions": cmd_compactions,
-            "upgrade": cmd_upgrade, "version": cmd_version}
+            "upgrade": cmd_upgrade, "version": cmd_version, "route": cmd_route}
 
 
 def main():
