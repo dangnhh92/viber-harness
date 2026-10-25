@@ -44,7 +44,7 @@ No fixed pipeline: reality inserts corrections between any two steps. Run one lo
 5. **Audit what comes back.** Do not trust the `HANDOFF:`. Re-verify the riskiest claims yourself. A "met" that fails re-checking makes the whole report suspect.
 6. **Accept or send back.** Incomplete or unverified goes back, never papered over. What you accept, you own. Rework goes to the **same** agent, which still holds its reading.
 
-**Parallel agents get disjoint file scopes, scratch paths included** (prefix scratch names with the agent's label). They run no project-wide build, lint or test; each proves only its own change, and you run the suite once over the union after all have landed.
+**Parallel agents get disjoint file scopes, scratch paths included** (prefix scratch names with the agent's label). They run no project-wide build, lint or test; each proves only its own change, and you run, once, the tests covering what the union touches (its callers, screens and locales) after all have landed; a full suite or every-locale capture only when the change is app-wide (a shared font, theme or string table) or the owner asks.
 
 ## 3. Which agent, on which model
 
