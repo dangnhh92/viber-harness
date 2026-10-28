@@ -145,6 +145,10 @@ A StoreKit configuration file is a simulation. IAP passes only after real purcha
 - Play: `purchases.subscriptionsv2.get` gives `subscriptionState` and `lineItems[].expiryTime`; use it, not the client claim.
 - Store `original_transaction_id` unique per account. Store event time per row for rule 29.
 
+## Store setup (App Store Connect)
+
+- Never attach an App Store promotional image to an in-app purchase or subscription unless the owner asked for that product to be promoted on the store page; the field is optional. An app was rejected under Guideline 2.3.2 because both products carried the app icon as their promotional image. Once a submission holds the products, the API cannot remove the image ("Version is not in modifiable state"), so the fix costs a web round trip and another review. A promoted product gets its own image, unique per product and never the app icon.
+
 ## Audit output
 
 For each app: inventory line (stores, products, stack, server or client-only), then one row per rule 1 to 30 with `file:line` and pass, fail or n/a, then per defect: severity, platform, concrete failure scenario (who, what, how long), fix, and which test row (T1 to T19) proves it.
