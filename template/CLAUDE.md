@@ -104,6 +104,7 @@ Name the chosen model and a one-line reason in the spawn, so a wrong call is vis
 - **Records in English. No secrets in records, ever.**
 - **A record's numbers are a dated observation.** Re-measure before briefing from one.
 - **To recall, grep `.viber/memory/index.md` first.** Never hand-edit `state.md` or `index.md`; they are generated.
+- **The project rules below the marker are rules only**: stack, banned SDKs, standing constraints. A product decision that can change (a price, a tier, a count of free items) is a `decision` record and lives in the spec, never there; two copies drift.
 - **Never park a "do X once Y happens" as a prose note** in a doc, comment or record body. Open a record whose title is the condition, so `check` raises it every turn.
 - The truth snapshot is generated from `fact` pointers (the Facts block in `viber state`); records hold why, intent, and lessons. Plans under `.viber/docs/` are optional; when code contradicts one, say so and ask which is right. Mechanics: `.viber/docs/rules/truth.md`.
 
