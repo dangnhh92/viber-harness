@@ -22,6 +22,10 @@ This skill is an original distillation. Where a rule paraphrases a third-party s
   `references/verify.md` follows its audit order and Core Web Vitals thresholds.
   Licence text: `licenses/MIT-web-quality-skills.txt`.
 
+- **Stageshow** by Benji Taylor, https://github.com/benjitaylor/skills, MIT License. Copyright (c) 2026 Benji Taylor.
+  Rules U44 and U45 paraphrase its `references/motion.md` (Changing text and values; Things that appear, travel and leave). The promo video block in new-app `references/store.md` paraphrases its poster, loop and rehearsal rules. Its faux product UI method is not carried over: these skills require real app captures.
+  Licence text: `licenses/MIT-stageshow.txt`.
+
 No file or passage is copied verbatim. The MIT and Apache notices ship anyway, so the skill stays compliant if a later edit quotes upstream text.
 
 ## Cited, not copied

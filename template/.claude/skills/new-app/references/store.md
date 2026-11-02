@@ -36,6 +36,12 @@
   - No prices, no "free", no "Premium" labels.
 - The same rules apply to Play phone screenshots and the Play feature graphic (1024x500).
 - App preview video: 886x1920, stereo AAC 48 kHz (mono is rejected).
+- Promo video, trailer or ad built from app captures:
+  - The app screen is shown whole: fit it to the frame height over a blurred fill of the same frame. Never crop the top or bottom of a capture.
+  - Choose the poster frame first: it is what most people see (a store thumbnail, autoplay off). It tells the story alone, shows the result on screen, and is never caught mid-change.
+  - Open on a calm frame. The payoff holds about 2 s; nothing on screen sits still for more than 3 s.
+  - Every change moves (designing-interfaces U44, U45); a cut never flashes a screen for one frame.
+  - A contact sheet misses one-frame flashes. Before calling a cut clean, list scene changes (`ffmpeg -i in.mp4 -vf "select='gt(scene,0.3)',showinfo" -f null -`) and step through each one frame by frame.
 - Grep store text, captions and UI for third-party trademarks (camera, film and brand names such as Polaroid, Kodak, Fuji) before any upload. Any hit blocks it.
 - People in screenshots: free stock has no model release. Use AI-generated people or people who signed a release.
 - Each IAP has its own promo image.

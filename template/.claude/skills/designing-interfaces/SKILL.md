@@ -109,6 +109,8 @@ Motion
 - **U14** Motion conveys a state change. Product transitions run 150 to 250 ms; staggered entrances finish within 900 ms `[default]`. Only `transform` and `opacity` animate. No `transition: all`. No bounce or elastic easing. Animation never blocks input. (Vercel Web Interface Guidelines)
 - **U15** `prefers-reduced-motion: reduce` removes or shortens every non-essential animation. (WCAG 2.2 SC 2.3.3)
 - **U32** Scroll-linked effects use IntersectionObserver or CSS scroll-driven animation, never a raw `scroll` listener that sets state on every event.
+- **U44** Every change moves, and only what changed moves. A number rolls its changed digits, a label slides or fades in its own slot, a menu replaced by another slides; nothing swaps in one frame. A button keeps one footprint across its states. (Stageshow)
+- **U45** Nothing pops and nothing leaves a hole. Each element has an entrance and stays mounted until its exit ends; a new row pushes the rows below it as it opens; a panel arrives with its content, never blank first; a resizing surface never stretches its text. (Stageshow)
 
 Copy
 - **U16** Buttons name the action ("Save changes", not "Continue"). Errors state cause and fix, never blame the user, and carry no jokes. No heading is restated in the first sentence below it. (Vercel Web Interface Guidelines)
