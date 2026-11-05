@@ -3431,6 +3431,72 @@ def cmd_route(args):
     return 0
 
 
+READ_GUARD_FILE = os.path.join(".viber", "read-guard")
+READ_GUARD_EXTS = (".md", ".txt", ".rst", ".adoc")
+READ_GUARD_DEFAULT_KB = 40
+READ_GUARD_MAX_HEADINGS = 120
+READ_GUARD_HEADING_CHARS = 200
+READ_GUARD_SCAN_BYTES = 2 * 1024 * 1024
+READ_GUARD_LIST_CHARS = 6000
+
+
+def _read_guard_ask(inp):
+    """Deny a whole-file Read of a large text doc and list its headings instead.
+    On by default; .viber/read-guard holds "off" or a threshold in KB. Any doubt passes."""
+    try:
+        if inp.get("offset") is not None or inp.get("limit") is not None:
+            return None
+        path = inp.get("file_path") or ""
+        if not path.lower().endswith(READ_GUARD_EXTS):
+            return None
+        try:
+            with open(os.path.join(_project_root(), READ_GUARD_FILE), encoding="utf-8-sig") as fh:
+                first = fh.readline().strip()
+        except OSError:
+            first = ""
+        if first.lower() == "off":
+            return None
+        try:
+            limit_kb = int(first)
+        except ValueError:
+            limit_kb = READ_GUARD_DEFAULT_KB
+        if limit_kb < 1:
+            limit_kb = READ_GUARD_DEFAULT_KB
+        size = os.path.getsize(path)
+        if size <= limit_kb * 1024:
+            return None
+        headings, fenced, total, scanned, stopped, listed = [], False, 0, 0, False, 0
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for number, line in enumerate(fh, 1):
+                scanned += len(line.encode("utf-8", errors="replace"))
+                if scanned > READ_GUARD_SCAN_BYTES:
+                    stopped = True
+                    break
+                if line.lstrip().startswith("```"):
+                    fenced = not fenced
+                elif not fenced and line.startswith("#"):
+                    total += 1
+                    text = line.rstrip()
+                    if len(text) > READ_GUARD_HEADING_CHARS:
+                        text = text[:READ_GUARD_HEADING_CHARS] + "..."
+                    entry = "%d: %s" % (number, text)
+                    if (len(headings) < READ_GUARD_MAX_HEADINGS
+                            and listed + len(entry) <= READ_GUARD_LIST_CHARS):
+                        headings.append(entry)
+                        listed += len(entry) + 1
+        msg = ("%s is %d KB, over the %d KB read guard: read a section with offset and limit."
+               % (os.path.basename(path), size // 1024, limit_kb))
+        if headings:
+            msg += "\nHeadings (line: heading):\n" + "\n".join(headings)
+        if total > len(headings):
+            msg += "\n(%d more headings omitted)" % (total - len(headings))
+        if stopped:
+            msg += "\n(scan stopped at 2 MB)"
+        return msg
+    except Exception:
+        return None
+
+
 def cmd_guard(_args):
     try:
         ev = json.load(sys.stdin)
@@ -3447,6 +3513,8 @@ def cmd_guard(_args):
         ask = ENV_ASK
     if tool == "Grep" and _names_env_file([inp.get("path") or "", inp.get("glob") or ""]):
         ask = ENV_ASK
+    if not ask and tool == "Read":
+        ask = _read_guard_ask(inp)
     if ask:
         # A keychain change goes to the person as a permission prompt; the others deny
         # with a question the agent answers by rerunning with its marker.

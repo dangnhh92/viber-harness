@@ -58,6 +58,7 @@ Run the sections the question needs. For "is everything ok", run all five.
 **4. Where is the waste?**
 - From `tokens.py`: the share per project, main against subagents, notification wakes, re-reads without an edit, the largest tool results, mid-session cache rebuilds.
 - Agents or delegated runs killed, re-dispatched or superseded (a stop, the same task sent twice).
+- Denied full reads: count the read-guard denials ("read guard" in the Read `permissionDecisionReason`) per project in transcripts, and the whole-file reads of large `.md` or `.txt` files that still got through (projects with `.viber/read-guard` set to `off`).
 - Work the owner did not ask for: dispatches a later owner message cancelled or called unneeded.
 - Model or effort above need: `opus` or `high` on decided work that someone re-checks anyway.
 
