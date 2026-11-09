@@ -5,13 +5,13 @@ description: Drive and verify an app on a real iPhone, iOS Simulator, Android em
 
 # Device and browser testing
 
-Tools: `agent-device` (MCP server `agent-device`, declared in `.mcp.json`, pinned 0.21.28) for real iPhone, Simulator and Android. Playwright for the browser. Never idb, AXe, or ad hoc `xcrun simctl io` taps. Do not write a custom XCUITest step driver for exploratory work; agent-device keeps its runner warm between steps.
+Tools: `agent-device` (MCP server `agent-device`, declared in `.mcp.json`, pinned 0.21.28) for real iPhone, Simulator and Android. `agent-browser` CLI for the browser, Playwright (plugin or MCP) as fallback and for WebKit. Never idb, AXe, or ad hoc `xcrun simctl io` taps. Do not write a custom XCUITest step driver for exploratory work; agent-device keeps its runner warm between steps.
 What "tested" means, oracles, review conditions: `.claude/skills/new-app/references/store.md` (Testing). It wins where it differs.
 
 ## Setup (once per machine)
 - Needs Node 22.12 or newer. `.mcp.json` starts the server with `npx -y agent-device@0.21.28 mcp`; approve the project MCP server when Claude Code asks. Run `npx -y agent-device@0.21.28 doctor` once and fix what it reports.
 - Real iPhone: Xcode, the phone paired and trusted (cable once, then Wi-Fi works), Developer Mode on, and `AGENT_DEVICE_IOS_TEAM_ID` set to your Apple team id in the shell profile so the runner can be signed.
-- Browser: the Playwright plugin or MCP server.
+- Browser: `brew install agent-browser`, then `agent-browser install` once (downloads Chrome for Testing). Fallback: the Playwright plugin or MCP server.
 - Upgrade on purpose: bump the pinned version in `.mcp.json` and here together, then rerun `doctor`.
 
 ## Loop
@@ -20,14 +20,21 @@ What "tested" means, oracles, review conditions: `.claude/skills/new-app/referen
 3. Verify each step with an assertion (`wait text`, `is`, `get`, `find`), not by looking.
 4. `close` at the end; on Simulator it keeps the runner warm for the next run.
 
+## Browser (agent-browser)
+- `agent-browser open <url>`, `snapshot -i` (interactive elements with refs `@eN`), `click @eN` / `fill @eN "text"`, `screenshot <file>.png`, `close`.
+- Semantic find when no ref fits: `find role button click --name "Save"`.
+- A site that needs the owner's login: `--auto-connect` attaches to the user's running Chrome and reuses its logins. Read only unless the plan says otherwise.
+- Full command docs: `agent-browser skills get core`.
+- Use Playwright instead when the plan needs WebKit (iOS web views), a scripted test suite, or agent-browser fails on the page.
+
 ## Selecting elements
 - Order: snapshot ref `@eN` (copy byte for byte), then id / accessibility label / role, coordinates last.
 - Refs expire after any screen change: take them from the latest diff or snapshot.
 - Prefer stable ids over visible text; text breaks under localization. A control you need with no id is a defect to report, not to work around silently.
-- Browser: role and label locators (`getByRole`, `getByLabel`), never CSS chains or XPath.
+- Browser: snapshot refs or role and label locators (`find role`, Playwright `getByRole` / `getByLabel`), never CSS chains or XPath.
 
 ## Waiting
-- Never `sleep` or a fixed timeout. Wait on a condition: `wait 'label="X"' <ms>`, `wait text`, Playwright web-first assertions.
+- Never `sleep` or a fixed timeout. Wait on a condition: `wait 'label="X"' <ms>`, `wait text`, `agent-browser wait`, Playwright web-first assertions.
 - `press` does not wait for its target; put an explicit `wait` before it when the target appears after load or animation.
 - Scroll with `scroll down --until <selector>`, never a fixed count.
 - Long operations (upload, sync, purchase): one wait with a generous bound (for example 30000 ms), then fail.

@@ -197,7 +197,7 @@ Start with none. When a problem keeps coming back, add the one plugin that fixes
 | Problem you hit | Plugin |
 |---|---|
 | The agent writes code against an old version of a library | `context7` (current library docs) |
-| The agent says the UI works but never looked at it | `device-testing` (ships with viber) for phones and simulators; `playwright` for the browser |
+| The agent says the UI works but never looked at it | `device-testing` (ships with viber) for phones and simulators; `agent-browser` for the browser, Playwright as fallback |
 | Symbol lookups by grep miss things | the LSP plugin for your stack (`typescript-lsp`, `swift-lsp`) |
 | Deploys, databases, designs live in a service | that service's plugin: `vercel`, `firebase`, `supabase`, `github`, `figma`, `railway` |
 
