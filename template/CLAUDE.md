@@ -46,10 +46,6 @@ No fixed pipeline: reality inserts corrections between any two steps. Run one lo
 
 **Parallel agents get disjoint file scopes, scratch paths included** (prefix scratch names with the agent's label). They run no project-wide build, lint or test; each proves only its own change, and you run, once, the tests covering what the union touches (its callers, screens and locales) after all have landed; a full suite or every-locale capture only when the change is app-wide (a shared font, theme or string table) or the owner asks.
 
-**Work that needs one resource usable by one job at a time** (a single simulator, emulator or physical device) **goes to one agent, done in sequence.** Parallel agents on it only queue behind each other.
-
-**Land each piece as it passes.** A piece that is finished and does not depend on unfinished work goes through the review gate and is committed before the next starts. Hold it back only when it must land together with a later piece (a schema change and the code that calls it), and say why in the handoff.
-
 ## 3. Which agent, on which model
 
 Two decisions. **The agent is the kind of work**: its scope, what it must not do, how it reports. **The model is chosen per spawn**, by you. A definition's `model:` is only a floor: a spawn where you chose nothing runs on it instead of your own, pricier model. Aliases pick up new releases on their own.
@@ -99,7 +95,7 @@ Tie-breaks: brief says what to do, `coder` (the review gate catches what it miss
 4. **Must the agent read more than about 100k tokens?** Avoid `haiku`: its price jumps past that size, and a long read is where a small model drops things.
 5. **Did this agent already fail this same piece twice on this model?** Go up one tier. Never a third try on the same model.
 
-Name the chosen model and a one-line reason in the spawn, so a wrong call is visible afterwards. Every spawn except `reviewer`, `runner` and `fork` carries one line `ROUTING: code=y mechanical=n open_decision=n rechecked=y owner_only=n big_read=n failed_twice=n security=n edge_cases=n`; the guard computes the pick with `viber route` and refuses a spawn that differs. When the owner names a model for a piece of work, add `OWNER-MODEL: <model> (msg <id>)` and spawn on it; only the model moves. When nothing applies, the default stands. **Always name an agent**, never `general-purpose` or a bare spawn: those inherit your model and price on the cheapest work.
+Name the chosen model and a one-line reason in the spawn, so a wrong call is visible afterwards. Every spawn except `reviewer`, `runner` and `fork` carries one line `ROUTING: code=y mechanical=n open_decision=n rechecked=y owner_only=n big_read=n failed_twice=n security=n edge_cases=n`; the guard computes the pick with `viber route` and refuses a spawn that differs. When nothing applies, the default stands. **Always name an agent**, never `general-purpose` or a bare spawn: those inherit your model and price on the cheapest work.
 
 ## 4. Memory and documents
 
@@ -107,7 +103,7 @@ Name the chosen model and a one-line reason in the spawn, so a wrong call is vis
 - **You are the only writer.** Agents return a `RECORDS:` block; transcribe it before their context is gone.
 - **Records in English. No secrets in records, ever.**
 - **A record's numbers are a dated observation.** Re-measure before briefing from one.
-- **To recall, run `python3 .viber/bin/viber recall "<what you need>"`** (semantic search over the records; degrades to keyword then grep, never fails). Never hand-edit `state.md` or `index.md`; they are generated.
+- **To recall, grep `.viber/memory/index.md` first.** Never hand-edit `state.md` or `index.md`; they are generated.
 - **The project rules below the marker are rules only**: stack, banned SDKs, standing constraints. A product decision that can change (a price, a tier, a count of free items) is a `decision` record and lives in the spec, never there; two copies drift.
 - **Never park a "do X once Y happens" as a prose note** in a doc, comment or record body. Open a record whose title is the condition, so `check` raises it every turn.
 - The truth snapshot is generated from `fact` pointers (the Facts block in `viber state`); records hold why, intent, and lessons. Plans under `.viber/docs/` are optional; when code contradicts one, say so and ask which is right. Mechanics: `.viber/docs/rules/truth.md`.
