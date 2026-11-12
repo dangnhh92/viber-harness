@@ -767,6 +767,25 @@ def cmd_fact(args):
     print(f"{rid}  fact  {label} -> {val}")
 
 
+# A task closed within minutes that quotes the owner is usually a standing rule logged
+# in the wrong type. Done tasks never surface again, so the rule is lost. Warn only:
+# viber shows the fault and never blocks the close.
+OWNER_QUOTE_RE = re.compile(r"owner msg|\bmsgs? \d{3,}", re.IGNORECASE)
+QUICK_CLOSE_SECONDS = 600
+
+
+def _quick_close_owner_quote(rec):
+    if rec.get("type") != "task":
+        return False
+    try:
+        age = (datetime.now() - datetime.fromisoformat(rec.get("created", ""))).total_seconds()
+    except (ValueError, TypeError):
+        return False
+    if age >= QUICK_CLOSE_SECONDS:
+        return False
+    return bool(OWNER_QUOTE_RE.search(f"{rec.get('title', '')}\n{rec.get('_body') or ''}"))
+
+
 def cmd_set(args):
     if len(args) < 2:
         die("usage: viber set <id> <status>")
@@ -775,6 +794,10 @@ def cmd_set(args):
     if status not in STATUSES:
         die(f"status must be one of {', '.join(STATUSES)}")
     was = rec.get("status")
+    if status == "done" and was != "done" and _quick_close_owner_quote(rec):
+        print(f"{rec['id']} is a task closed minutes after it was opened and quotes an "
+              "owner message. If it records a standing rule, write it as a decision: "
+              'viber new decision "..."', file=sys.stderr)
     rec["status"] = status
     rec["updated"] = now()
     write_record(rec)
