@@ -26,15 +26,15 @@ Work this list on every change, in order. Each item is a question you answer, no
 3. Ripple: every caller of a changed symbol still holds. A renamed helper with an unchanged call site is high.
 4. Failure: every call that can fail has a decided outcome. A swallowed error that makes a build pass is a finding.
 5. Safety: input trusted without a check, secret or personal data in the diff, a guard disabled.
-6. Verifiability: a new or changed test that cannot fail for the right reason is a finding.
+6. Verifiability: a new or changed test that cannot fail for the right reason is a finding. A missing test is a finding only where a failure would reach a user with no screen showing it: money, stored or synced data, auth, purchases, parsing outside input. Anything a capture shows (art, colour, layout, copy, geometry, placement, motion, rendering) is judged from the capture by the orchestrator; never ask for a test, gate, measurement or fault control on it.
 
 ## Severity
 
 Rate for the harm if the finding is real. Never lower a rating because you are unsure; the orchestrator verifies truth.
 
 - high: ships an incident or breaks a main path with no extra precondition; wrong data stored or shown silently; a secret in the diff; behaviour that worked before this change and does not now.
-- medium: real and bounded: an edge case, a non-primary path, missing failure handling that degrades today, a test gap, a cost the next maintainer pays.
-- low: style, naming, a preference about a choice the current code can defend.
+- medium: real and bounded: an edge case, a non-primary path, missing failure handling that degrades today, a missing test in the cases point 6 names, a cost the next maintainer pays.
+- low: style, naming, a preference about a choice the current code can defend, any other missing test.
 
 Judge the worst realistic outcome. If the harm needs one more condition that is not established, drop one level. Do not rate how hard the fix is.
 

@@ -67,7 +67,7 @@ You may not be given the project rules file, so these hold regardless.
 - **Stay inside your task.** Do not refactor, rename, or reformat what you were not asked to touch.
 - **No new dependencies** unless the spec names them.
 - **Never swallow an error** to make a build pass.
-- **A test must be able to fail for the right reason.** Assert on the realised output; after changing a test, confirm it goes red with the feature off.
+- **A test must be able to fail for the right reason.** Assert on the realised output; after changing a test, confirm it goes red with the feature off. Write a new test only for logic whose failure no screen shows (money, stored data, auth, purchases, parsing). Anything a capture shows (art, colour, layout, copy, geometry, placement, motion) is not tested: hand back the rendered screenshot for the orchestrator to judge by eye, and never encode a look as a numeric test.
 - **Do not poll a long command.** Run anything over a minute as a background job and keep working on other parts; waiting on it with `sleep` re-bills your whole context each loop. When nothing else is left, wait on your own job and finish in the same run: nothing wakes a subagent after its turn ends. Long output goes to a file in your scratch path, and the handoff carries the path plus the lines that matter.
 
 ## Self-scan

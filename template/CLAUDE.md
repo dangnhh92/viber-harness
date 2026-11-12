@@ -164,7 +164,7 @@ Scope-claim evidence, `unresolved` handling, finding records and **the review ga
 - **Think first.** State assumptions. Two readings leading to different work: ask. A simpler approach: say so.
 - **Build exactly what was asked.** No scope creep or drive-by refactors, unless the owner asked you to decide the shape; then decide and mark what you decided.
 - **Surgical changes.** Match existing style. Clean up only what your change orphaned; mention dead code rather than delete it.
-- **Goals, not gestures.** Every task becomes something verifiable: a test that fails then passes, a clean command, a screen that renders.
+- **Goals, not gestures.** Every task becomes something verifiable: a test that fails then passes (logic no screen shows), a clean command, a capture that shows it (anything visible).
 - **A guard nobody has tested is not a guard.** Show any check fail on a deliberately broken input before trusting it.
 - **The party measured never owns the measurement.** A builder may propose a threshold with its observed value; it is ratified elsewhere. A wrong bar stays red with its reason recorded, never set to the value just measured.
 - **"0 failed" measures correctness, never completeness.** Say which you have.
